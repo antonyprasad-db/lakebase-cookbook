@@ -185,8 +185,17 @@ print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
 # MAGIC ## 5. Certified core from Unity Catalog metric views — ✍️ OPTIONAL
 # MAGIC Step 4b marked a node certified by hand. This does it from real curated semantics:
 # MAGIC `graph_certified.py` reads this workspace's Unity Catalog metric views and emits nodes
-# MAGIC and edges already tagged `source_method='uc_certified'`, so the authority stage picks
-# MAGIC them up with no further wiring.
+# MAGIC and edges already tagged `source_method='uc_certified'`.
+# MAGIC
+# MAGIC **Two things this does NOT do, and both matter.** It writes nothing — you load the rows
+# MAGIC yourself. And loading them is not sufficient for the boost to fire: retrieval seeds
+# MAGIC exclusively from `graph.node_embeddings`, so a certified node with no embedding can never
+# MAGIC be a seed; and `certified_rows()` emits only view→field edges, so nothing joins the
+# MAGIC certified subgraph to the business graph and expansion cannot reach it from a business
+# MAGIC seed either. Until you embed these nodes (and, if you want cross-over, add your own edges
+# MAGIC linking a measure to the tables or entities it describes), the boost fires only when the
+# MAGIC question itself semantically matches a metric-view field. That is a real design
+# MAGIC constraint, not a wiring-free win.
 # MAGIC
 # MAGIC Requires at least one metric view you can read. Scope it to one catalog — unscoped
 # MAGIC discovery reads every catalog you can see, which on a large workspace is thousands of rows.
@@ -211,17 +220,18 @@ if CERTIFIED_CATALOG:
     views = discover_metric_views(reader, catalog=CERTIFIED_CATALOG)
     print(f"found {len(views)} user metric view(s) in {CERTIFIED_CATALOG}")
 
-    nodes, edges = [], []
+    certified_nodes, certified_edges = [], []
     for cat, sch, name in views:
         view = read_metric_view(reader, cat, sch, name)
         rows = certified_rows(view)
-        nodes.extend(rows.nodes)
-        edges.extend(rows.edges)
+        certified_nodes.extend(rows.nodes)
+        certified_edges.extend(rows.edges)
         measures = sum(1 for f in view.fields if f.is_measure)
         print(f"  {view.fqn}: {measures} measure(s), "
               f"{len(view.fields) - measures} dimension(s), owner={view.owner or 'unknown'}")
 
-    print(f"\n{len(nodes)} certified node(s) and {len(edges)} edge(s) ready to load.")
+    print(f"\n{len(certified_nodes)} certified node(s) and "
+          f"{len(certified_edges)} edge(s) ready to load.")
     print("Load them the same way step 3 loads the business graph, then embed each node with "
           "graph_certified.embedding_text(node) — NOT its bare name. A question says "
           "'how much did we make', not 'total_revenue', so the display name, description and "

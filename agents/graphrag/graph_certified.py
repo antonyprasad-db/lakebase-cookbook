@@ -8,29 +8,46 @@ Catalog semantics ("reusable SQL objects that define and govern business KPIs").
 WHY METRIC VIEWS AND NOTHING ELSE
 Unity Catalog business semantics has four parts: metric views, domains, governed Pages, and
 certification/deprecation signals. Only metric views are used here, deliberately: the required
-path of a cookbook example must run for a reader without an allow-list, and metric views are
-demonstrably broadly available (a survey of one workspace found 4,210 user metric views across
-603 catalogs). The other three are left as future enrichment precisely so this module's
-prerequisite stays "you have a metric view".
+path of a cookbook example should run for a reader without an allow-list, and metric views are the
+part of that surface with the widest reach. For calibration rather than proof: on one large
+Databricks-internal workspace,
+``SELECT count(*), count(DISTINCT table_catalog) FROM system.information_schema.tables
+WHERE table_type = 'METRIC_VIEW' AND table_catalog NOT LIKE '__databricks_internal%'``
+returned 4,210 across 603 catalogs. That is one workspace and an internal one, so treat it as
+"widely used where it is used", not as a guarantee about any reader's workspace. (It does not
+contradict the sampling note below: internals dominated the first page of an *unfiltered*,
+unordered scan; the count above excludes them.) The other three parts are future enrichment so
+this module's prerequisite stays "you have a metric view".
 
 WHY THIS DOES NOT USE THE `semantic_*` SYSTEM TABLES
 `information_schema.semantic_views` / `semantic_dimensions` / `semantic_metrics` /
 `semantic_relationships` look like exactly the structured source this needs. They are not:
-surveying one workspace, all 12 catalogs exposing them were Snowflake connections surfaced
-through Lakehouse Federation, and the native catalog holding an actual Databricks metric view
-exposed none of them. They describe **Snowflake** semantic views. Reading them would silently
-produce a builder that works only against federated Snowflake and finds nothing in Unity Catalog.
+surveying one workspace, all 12 catalogs exposing them were Snowflake connections surfaced through
+Lakehouse Federation, and the native catalog holding an actual Databricks metric view exposed none
+of them. The defensible reading of that evidence: they are populated for **federated Snowflake**
+semantic views and not for native Databricks metric views today. Whether that is permanent or
+simply not implemented yet is unknown — either way, reading them finds nothing for a Databricks
+metric view now, which is why this module does not.
 
 THE READ PATH, AND WHY IT TAKES TWO QUERIES
   1. `system.information_schema.tables WHERE table_type = 'METRIC_VIEW'` — discovery. Structured
      and cheap. Internal catalogs must be filtered: Genie/Lakeview keep their own metric views
      under `__databricks_internal_catalog_lakeview_*`, and in one sample two of the first three
      hits were those rather than user objects.
-  2. `DESCRIBE EXTENDED <fqn>` — the field detail. `information_schema.columns` gives names,
-     types and comments for a metric view, but **cannot distinguish a measure from a dimension**:
-     both `data_type` and `full_data_type` report a measure as plain `bigint`. Only DESCRIBE
-     marks it, by suffixing the type with ` measure`. Since measure-vs-dimension is the whole
-     point of a semantic layer, DESCRIBE is not optional.
+  2. `DESCRIBE EXTENDED <fqn>` — the field detail, including which fields are measures.
+
+     Why not `information_schema.columns`, which would be structured and need no parsing?
+     Because measured against a live metric view it reports a measure as plain `bigint` in BOTH
+     `data_type` and `full_data_type` — it carries no measure marker at all. This module does not
+     query it, so that observation is not exercised by any test here; it is why the design went
+     the way it did, not something the code proves.
+
+     Two structured alternatives were NOT ruled out and are worth revisiting if the parsing here
+     ever bites: a metric view's own YAML definition has explicit `measures:` and `dimensions:`
+     blocks and is reachable via `SHOW CREATE TABLE`, and recent runtimes support
+     `DESCRIBE ... AS JSON`. Either would remove the ` measure`-suffix scraping this module calls
+     its one brittle coupling. They were skipped for reach (older runtimes) and because the YAML
+     needs a second parser, not because they are worse.
 
 DESCRIBE's fourth column is named `metadata` and carries the semantic payload as JSON
 (`display_name`, `synonyms`), so that part is parsed as JSON rather than scraped from prose.
@@ -47,6 +64,7 @@ because they are the raw material for "who wrote it, how fresh" — the ranking 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -76,7 +94,19 @@ HAS_MEASURE = "HAS_MEASURE"
 HAS_DIMENSION = "HAS_DIMENSION"
 
 _MEASURE_SUFFIX = " measure"
-_DETAIL_BOUNDARY_PREFIX = "#"
+
+# Unity Catalog identifiers permitted without quoting. Deliberately narrow: this is an
+# allow-list guarding string interpolation, so anything unusual should be rejected loudly
+# rather than accommodated.
+_CATALOG_RE = re.compile(r"[A-Za-z0-9_-]+")
+_DETAIL_BOUNDARY = "# Detailed Table Information"
+
+# A '#' prefix ALONE cannot mark the boundary: measures are routinely named "# Orders" or
+# "# of Customers", and treating those as the boundary silently truncates the field list and
+# folds every later field into the metadata dict. Section headers always have an empty
+# data_type, whereas a field always has one, so that is the real discriminator.
+def _is_detail_boundary(col: str, data_type: str) -> bool:
+    return col == _DETAIL_BOUNDARY or (col.startswith("#") and not data_type)
 
 
 class SqlReader(Protocol):
@@ -134,8 +164,17 @@ def discover_metric_views(
     """
     where = ["table_type = 'METRIC_VIEW'"]
     if catalog:
-        # Quote-escaped rather than interpolated raw: a catalog name is caller-supplied.
-        where.append(f"table_catalog = '{catalog.replace(chr(39), chr(39) * 2)}'")
+        # VALIDATED, not escaped. Doubling single quotes is the Postgres habit and it does not
+        # hold here: Spark SQL honours backslash escapes, so a catalog of "x\\' OR true --"
+        # survives doubling as 'x\\'' OR true --' and injects — the predicate becomes
+        # (... AND table_catalog='x') OR true, returning every row and dropping the ORDER BY.
+        # An allow-list is the only version of this that is actually safe.
+        if not _CATALOG_RE.fullmatch(catalog):
+            raise ValueError(
+                f"catalog must match {_CATALOG_RE.pattern} (got {catalog!r}); "
+                "identifiers are not escaped into this query"
+            )
+        where.append(f"table_catalog = '{catalog}'")
     sql = (
         "SELECT table_catalog, table_schema, table_name "
         "FROM system.information_schema.tables "
@@ -175,7 +214,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         val = (row[1] or "").strip() if len(row) > 1 else ""
         if not col:
             continue                                  # spacer row between the two blocks
-        if col.startswith(_DETAIL_BOUNDARY_PREFIX):
+        if _is_detail_boundary(col, val):
             in_detail = True
             continue
         if in_detail:
@@ -198,7 +237,11 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
             if isinstance(parsed, dict):
                 display_name = str(parsed.get("display_name") or "")
                 syn = parsed.get("synonyms")
-                synonyms = tuple(str(s) for s in syn) if isinstance(syn, list) else ()
+                # Only string elements: a malformed list like [null, 5, {"a": 1}] would
+                # otherwise reach props.synonyms and the embedded text as "None", "5" and
+                # "{'a': 1}".
+                synonyms = (tuple(x for x in syn if isinstance(x, str) and x)
+                            if isinstance(syn, list) else ())
 
         fields.append(SemanticField(
             name=col, data_type=data_type, comment=comment,
@@ -230,7 +273,15 @@ def node_id_for_field(view: CertifiedView, f: SemanticField) -> str:
 
 @dataclass
 class GraphRows:
-    """Nodes and edges ready for graph_build's writer, in the example's own shapes."""
+    """Nodes and edges for a caller to load.
+
+    Note the shapes differ from `graph_build.assemble_graph`, which returns nodes as a dict keyed
+    by node_id (values carrying a `path`) and edges as a set of bare `(src, dst, rel)` tuples with
+    no props. These are lists of dicts with an inline `node_id`, no `path`, and edge `props`. Both
+    satisfy `sql/schema.sql` — `path` is nullable and edge `props` defaults to `'{}'` — but a
+    loader written against `assemble_graph`'s output needs adapting, and the naive adaptation
+    drops the edge props that carry the whole provenance contract.
+    """
 
     nodes: list[dict] = field(default_factory=list)
     edges: list[dict] = field(default_factory=list)

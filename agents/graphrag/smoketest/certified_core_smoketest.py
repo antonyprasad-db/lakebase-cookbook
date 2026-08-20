@@ -25,6 +25,8 @@ from graph_certified import (  # noqa: E402
     discover_metric_views,
     embedding_text,
     is_internal_catalog,
+    node_id_for_field,
+    node_id_for_view,
     parse_describe,
     read_metric_view,
 )
@@ -103,6 +105,42 @@ def main() -> int:
     check("malformed metadata keeps the measure flag correct",
           by_name["broken_meta"].is_measure, False)
 
+    print("\n== TEST 1b: hostile and legacy DESCRIBE shapes ==")
+    # a measure named "# Orders" is routine, and treating '#' alone as the metadata boundary
+    # truncated the field list AND folded later fields into the metadata dict
+    hashed = parse_describe(
+        [["ship_date", "date", "d", "{}"],
+         ["# Orders", "bigint measure", "count", "{}"],
+         ["total_revenue", "decimal(10,2) measure", "rev", "{}"],
+         ["", "", "", ""],
+         ["# Detailed Table Information", "", "", ""],
+         ["Owner", "me@example.com", "", ""]],
+        "c", "s", "n")
+    check("a field named '# Orders' is not mistaken for the metadata boundary",
+          [f.name for f in hashed.fields], ["ship_date", "# Orders", "total_revenue"])
+    check("and it keeps its measure flag",
+          next(f.is_measure for f in hashed.fields if f.name == "# Orders"), True)
+    check("the real boundary still ends the field block", hashed.owner, "me@example.com")
+
+    # 3-column DESCRIBE (older DBR, or plain DESCRIBE): enrichment must degrade, not raise
+    three = parse_describe([["total_revenue", "decimal(10,2) measure", "rev"],
+                            ["# Detailed Table Information", "", ""]], "c", "s", "n")
+    check("a 3-column DESCRIBE still yields the field", len(three.fields), 1)
+    check("...and keeps the measure flag", three.fields[0].is_measure, True)
+    check("...with enrichment simply absent", three.fields[0].display_name, "")
+    check("a 2-column row does not raise",
+          len(parse_describe([["f", "int"]], "c", "s", "n").fields), 1)
+
+    # metadata that is valid JSON but the wrong type
+    for bad_meta in ("[1,2]", '"a string"', "123", "null"):
+        got = parse_describe([["f", "int", "c", bad_meta]], "c", "s", "n").fields[0]
+        check(f"metadata {bad_meta!r} degrades safely", (got.display_name, got.synonyms), ("", ()))
+    nonlist = parse_describe([["f", "int", "c", '{"synonyms":"notalist"}']], "c", "s", "n")
+    check("a non-list synonyms value is ignored", nonlist.fields[0].synonyms, ())
+    dirty = parse_describe([["f", "int", "c", '{"synonyms":[null,5,{"a":1},"real",""]}']],
+                           "c", "s", "n")
+    check("non-string synonym elements are dropped", dirty.fields[0].synonyms, ("real",))
+
     print("\n== TEST 2: discovery filters Genie/Lakeview internals ==")
     check("internal prefix is recognised",
           is_internal_catalog("__databricks_internal_catalog_lakeview_1444828305810485"), True)
@@ -120,10 +158,23 @@ def main() -> int:
     scoped = FakeReader([["c", "s", "n"]], DESCRIBE_ROWS)
     discover_metric_views(scoped, catalog="my_cat")
     check("a catalog scope reaches the query", "table_catalog = 'my_cat'" in scoped.seen[0], True)
-    quoted = FakeReader([], DESCRIBE_ROWS)
-    discover_metric_views(quoted, catalog="o'brien")
-    check("a quote in the catalog name is escaped, not injected",
-          "table_catalog = 'o''brien'" in quoted.seen[0], True)
+    # Quote-doubling was the original approach and it is NOT safe here: Spark honours backslash
+    # escapes, so "x\\' OR true --" survives doubling and injects, turning the predicate into
+    # (... AND table_catalog='x') OR true — every row, ORDER BY dropped. Validation, not escaping.
+    for hostile in ("x\\' OR true --", "x'; DROP TABLE y--", "x\\", "a b", "'", "o'brien"):
+        rejected = False
+        try:
+            discover_metric_views(FakeReader([], DESCRIBE_ROWS), catalog=hostile)
+        except ValueError:
+            rejected = True
+        check(f"catalog {hostile!r} is rejected, not interpolated", rejected, True)
+    for ok_name in ("my_catalog", "cchan_catalog", "a-b_1"):
+        accepted = True
+        try:
+            discover_metric_views(FakeReader([], DESCRIBE_ROWS), catalog=ok_name)
+        except ValueError:
+            accepted = False
+        check(f"a legitimate catalog {ok_name!r} is accepted", accepted, True)
 
     print("\n== TEST 3: projection onto graph rows ==")
     rows = certified_rows(view)
@@ -134,11 +185,38 @@ def main() -> int:
           {n["props"]["source_method"] for n in rows.nodes}, {CERTIFIED_SOURCE_METHOD})
     check("every edge carries it too",
           {e["props"]["source_method"] for e in rows.edges}, {CERTIFIED_SOURCE_METHOD})
-    types = {n["node_type"] for n in rows.nodes}
-    check("node types are view/measure/dimension", types,
-          {VIEW_NODE_TYPE, MEASURE_NODE_TYPE, DIMENSION_NODE_TYPE})
-    check("measures get the measure relation",
-          sorted({e["rel"] for e in rows.edges}), sorted([HAS_MEASURE, HAS_DIMENSION]))
+    # Per field, NOT set-membership over {Measure, Dimension}: a wholesale swap of the two is
+    # invisible to a set assertion, and this mapping is the module's entire reason for existing.
+    by_id = {n["node_id"]: n for n in rows.nodes}
+    rev_id = node_id_for_field(view, by_name["total_revenue"])
+    ship_id = node_id_for_field(view, by_name["ship_date"])
+    check("a measure becomes a Measure node", by_id[rev_id]["node_type"], MEASURE_NODE_TYPE)
+    check("a dimension becomes a Dimension node", by_id[ship_id]["node_type"],
+          DIMENSION_NODE_TYPE)
+    # keyed by dst_id, which only works while edges point view -> field. Use .get so a
+    # direction regression reports as a failed check rather than a KeyError traceback.
+    edge_for = {e["dst_id"]: e for e in rows.edges}
+    check("a measure edge is HAS_MEASURE", edge_for[rev_id]["rel"], HAS_MEASURE)
+    check("a dimension edge is HAS_DIMENSION", edge_for[ship_id]["rel"], HAS_DIMENSION)
+    # direction is asserted because README/mdx and the ASCII diagram all promise view -> field
+    check("edges point view -> field, not the reverse",
+          (edge_for.get(rev_id) or {}).get("src_id"), node_id_for_view(view))
+
+    # The LITERAL value, once. Comparing against the imported constant is a tautology: rename the
+    # constant to a typo and the suite stays green while sql/graphrag_retrieval.sql and
+    # graph_retrieve.py keep hardcoding 'uc_certified', so the nodes land and rank as inferred —
+    # the exact silent no-op the module docstring warns about.
+    check("the certified marker is literally 'uc_certified'",
+          by_id[rev_id]["props"]["source_method"], "uc_certified")
+    check("the relation literals are HAS_MEASURE / HAS_DIMENSION",
+          (edge_for[rev_id]["rel"], edge_for[ship_id]["rel"]), ("HAS_MEASURE", "HAS_DIMENSION"))
+    # both ride into gold_triplets' 8-column contract, so a wrong value ships downstream
+    check("source_agent is set on nodes and edges",
+          (by_id[rev_id]["props"].get("source_agent"),
+           ((edge_for.get(rev_id) or {}).get("props") or {}).get("source_agent")),
+          ("uc-certified-core", "uc-certified-core"))
+    check("curated edges carry confidence 1.0",
+          ((edge_for.get(rev_id) or {}).get("props") or {}).get("confidence"), 1.0)
     view_node = next(n for n in rows.nodes if n["node_type"] == VIEW_NODE_TYPE)
     check("authority metadata rides on the view node", view_node["props"]["owner"],
           "chitra.chandrakumar@databricks.com")

@@ -271,10 +271,20 @@ outnumbered user objects on the first page of results.
 
 The builder is pure Python behind a `SqlReader` protocol, so it does not care how you reach Unity
 Catalog — `spark.sql`, the SQL connector, or the Statement Execution API all satisfy it. Notebook
-step 5 wires it to the same workspace's Unity Catalog and writes the result into the graph.
+step 5 reads this workspace's metric views and reports what it would emit.
 
-**It writes nothing on its own.** `certified_rows()` returns nodes and edges; loading them uses the
-same path `graph_build.py` already does, which is what keeps this module testable with no database.
+**It writes nothing.** `certified_rows()` returns nodes and edges and stops there, which is what
+keeps the module testable with no database. Loading them is yours to do: note `graph_build.py`
+contains no loader either, and the notebook's load step is commented-out scaffolding, so there is
+no existing writer to reuse.
+
+**Loading them is necessary but not sufficient for the boost to fire.** Retrieval seeds only from
+`graph.node_embeddings`, so a certified node with no embedding can never be a seed; and this module
+emits only view→field edges, so nothing joins the certified subgraph to the business graph and
+expansion cannot reach it from a business seed. Until you embed these nodes — with
+`embedding_text()`, not the bare column name — and optionally add your own edges linking a measure
+to what it describes, authority ranking fires only when the question itself matches a metric-view
+field. That is a real constraint of this design, worth knowing before you calibrate the boost.
 
 ## Layout
 
@@ -290,10 +300,12 @@ graphrag/
 ├── graph_build.py       # pure assemble_graph(dims, enrichment) → (nodes, edges); guards the FK
 ├── graph_retrieve.py    # pure in-memory twin of the retrieval SQL (for offline dev/test)
 ├── graph_upstream.py    # documents → chunk → extract → entity resolution → gold_triplets
+├── graph_certified.py     # Unity Catalog metric views -> certified nodes/edges
 ├── notebooks/
 │   └── graphrag_build_and_query.py   # build the graph, embed, write to Lakebase, query
 └── smoketest/
-    └── graphrag_logic_smoketest.py   # offline validation (no Lakebase needed)
+    ├── graphrag_logic_smoketest.py   # offline validation (no Lakebase needed)
+    └── certified_core_smoketest.py   # DESCRIBE parsing + projection (no warehouse needed)
 ```
 
 ## Run the offline smoke test
@@ -311,6 +323,19 @@ authority ranking (certified-over-inferred, the positive-score and below-1.0 cla
 float, a string — reaching neither an exception nor a non-finite score, unrounded ordering,
 verbatim `source_class`),
 dangling-edge guard, blended-score ranking, depth bound, and the `seed_floor` distractor guard.
+
+The certified-core builder has its own suite, which needs no warehouse — the `SqlReader` protocol
+lets a fake replay recorded output:
+
+```bash
+uv run --python 3.11 smoketest/certified_core_smoketest.py
+```
+
+Its `DESCRIBE` fixture is verbatim live output, because parsing `DESCRIBE` is the module's one
+brittle coupling and inventing its shape would prove nothing. It covers measure-vs-dimension
+detection, a field named `# Orders` (which must not be mistaken for the metadata boundary),
+3-column and 2-column `DESCRIBE` rows, malformed metadata JSON, and rejection of catalog names
+that would otherwise be interpolated into SQL.
 
 ## Deploy (Asset Bundle)
 
@@ -337,6 +362,10 @@ small example supply-chain graph and embeds its nodes via your embedding endpoin
 - Databricks workspace with **Lakebase (Autoscaling)** enabled
 - A model-serving **embeddings** endpoint and a **chat** endpoint registered in the workspace
 - `databricks` CLI + `uv`
+- `graph.nodes` must have a `props` column — it is in [`sql/schema.sql`](sql/schema.sql), but a
+  graph built by an older or bespoke script may lack it; see the note under Operational guardrails
+- **For the certified core only:** at least one Unity Catalog **metric view** you can read. Nothing
+  else in the example needs it, and the ranking behaves identically without one
 
 ---
 
