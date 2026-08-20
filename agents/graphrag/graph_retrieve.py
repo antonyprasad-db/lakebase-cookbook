@@ -87,18 +87,28 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
     # 3) assemble + rank, then let source authority break the tie between an
     #    equally-relevant certified node and an inferred one.
     #
-    #    The `or {}` and the 'inferred' fallback mirror the SQL's COALESCE, and they are
-    #    load-bearing for the same reason: a node with no source_method must score exactly
-    #    as it did before authority existed, never None. In the SQL a NULL weight would
-    #    sort FIRST under ORDER BY ... DESC and hand rank 1 to a garbage node; here it
-    #    would raise on the multiply. Both failures are pinned by the smoketest.
+    #    Every line below has a counterpart in the SQL; keep them in step. In particular:
+    #      * `is None` rather than `or`, because COALESCE catches only NULL. A node carrying
+    #        {"source_method": ""} must read as "" in BOTH halves, not "" in SQL and
+    #        "inferred" here.
+    #      * `score > 0` guards the boost. seed_similarity is 1 - cosine_distance so it spans
+    #        [-1, 1], and seed_floor's -1.0 default admits negatives; multiplying a negative
+    #        score makes it more negative, demoting the certified node the boost exists to
+    #        promote (-0.10 * 2.0 = -0.20, below an inferred -0.15).
+    #      * a None boost coalesces to 1.0, matching the SQL's COALESCE, rather than raising.
+    #      * the sort uses the UNROUNDED key; ordering by the rounded output would collapse
+    #        scores differing beyond 4 dp into ties (0.175024 / 0.175006 -> 0.1750) and let
+    #        the tiebreak reorder them, which is not a no-op.
+    boost = 1.0 if authority_boost is None else authority_boost
     out = []
     for nid, score in best.items():
         if nid not in nodes:
             continue
         n = nodes[nid]
-        source_class = (n.get("props") or {}).get("source_method") or "inferred"
-        weight = authority_boost if source_class == "uc_certified" else 1.0
+        raw = (n.get("props") or {}).get("source_method")
+        source_class = "inferred" if raw is None else raw
+        weight = boost if (source_class == "uc_certified" and score > 0) else 1.0
+        rank_key = score * weight
         out.append({
             "node_id": nid,
             "node_type": n["node_type"],
@@ -107,9 +117,14 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
             "rels": sorted(rels.get(nid, [])),
             "score": round(score, 4),
             "source_class": source_class,
-            "authority_score": round(score * weight, 4),
+            "authority_score": round(rank_key, 4),
+            "_rank_key": rank_key,
         })
-    # Ties broken by node_id so the order is deterministic across runs — an authority
-    # boost makes exact ties materially more likely than the raw scores did.
-    out.sort(key=lambda r: (-r["authority_score"], r["node_id"]))
+    # Tie broken on node_id for determinism; a boost makes exact ties likelier than the raw
+    # scores did. NOTE Postgres orders TEXT by database collation while this compares Unicode
+    # codepoints, so the halves agree only under C collation — matters for ids differing in
+    # case or punctuation.
+    out.sort(key=lambda r: (-r["_rank_key"], r["node_id"]))
+    for r in out:
+        del r["_rank_key"]
     return out[:limit]

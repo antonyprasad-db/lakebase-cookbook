@@ -103,30 +103,38 @@ scored AS (
     GROUP BY node_id
 )
 
--- 4) ASSEMBLE CONTEXT — join back to node detail, rank by blended score, then let
---    source authority break the tie between an equally-relevant certified node and an
---    inferred one.
+-- 4) ASSEMBLE CONTEXT — join back to node detail, rank by relevance, then let source
+--    authority break the tie between an equally-relevant certified node and an inferred one.
 --
---    AUTHORITY, and why it is a multiplier rather than a sort key: ordering by
---    (authority, score) would let a barely-relevant certified node outrank a highly
---    relevant inferred one, which is worse than no authority at all. Multiplying keeps
---    relevance meaningful and makes the strength one tunable knob, like `seed_floor`.
---    `:authority_boost` defaults to 1.0, which is an exact no-op: every weight is then
---    1.0 and the ordering is arithmetically identical to the pre-authority behaviour,
---    certified rows present or not. Calibrate it up (1.2–2.0) once a certified core
---    exists; see "Configuration and tuning".
+--    AUTHORITY IS A MULTIPLIER, NOT A SORT KEY. Ordering by (authority, score) would let a
+--    barely-relevant certified node outrank a highly relevant inferred one, which is worse
+--    than no authority signal at all. Multiplying keeps relevance meaningful and makes the
+--    strength one tunable knob, like `seed_floor`.
 --
---    COALESCE IS LOAD-BEARING — do not remove it. A node whose props carry no
---    `source_method` yields NULL from the CASE, `graph_score * NULL` is NULL, and
---    Postgres sorts NULLs FIRST under ORDER BY ... DESC. That is the same rank-1
---    garbage failure the seed NaN guard above exists to prevent, arriving through a
---    different door. The smoketest pins it.
---    `:authority_boost` is bound ONCE, in the inner SELECT, and the outer query orders by
---    the computed column. Referencing the parameter three times (score, ORDER BY, output)
---    would bind it three times under drivers that do not de-duplicate named parameters,
---    turning one knob into three positional binds a caller has to supply in order.
+--    ONLY POSITIVE SCORES ARE BOOSTED, and that guard is load-bearing. `seed_similarity` is
+--    `1 - cosine_distance`, so it spans [-1, 1], and the default `seed_floor = -1.0` admits
+--    negative-similarity seeds by design. Multiplying a negative score makes it MORE
+--    negative: a certified node at -0.10 with a boost of 2.0 becomes -0.20 and sorts BELOW
+--    an inferred node at -0.15 — the boost would demote exactly what it exists to promote,
+--    and worsen as the knob is raised. Boosting only above zero keeps the transform monotone.
+--
+--    `:authority_boost` defaults to 1.0, which leaves the weight at 1.0 for every row and the
+--    ordering identical to the pre-authority behaviour, certified rows present or not. Note
+--    the ORDER BY uses the UNROUNDED product on purpose: ordering by the rounded output
+--    column would collapse scores that differ beyond 4 dp into ties (0.175024 and 0.175006
+--    both round to 0.1750) and let the tiebreak reorder them, which is not a no-op.
+--
+--    COALESCE guards ONE input only: `:authority_boost` bound to NULL. The CASE itself cannot
+--    return NULL — it has an explicit ELSE, and a row whose props lack `source_method` makes
+--    the WHEN condition UNKNOWN, not true, so it falls to ELSE and yields 1.0. (`props` is
+--    NOT NULL DEFAULT '{}' in schema.sql, so a NULL props is unreachable too.) Without the
+--    COALESCE a NULL bind would make every score NULL, and Postgres sorts NULLs FIRST under
+--    ORDER BY ... DESC — rank 1 for a garbage row. It therefore trades a loud failure for a
+--    silent fallback to 1.0; that is the intended trade, but it does mask a caller bug.
 SELECT
-    node_id, node_type, name, props, nearest_hop, rels, score, source_class, authority_score
+    node_id, node_type, name, props, nearest_hop, rels, score, source_class,
+    -- Rounded for display only. The ORDER BY below deliberately uses the UNROUNDED key.
+    ROUND(authority_rank_key::numeric, 4) AS authority_score
 FROM (
     SELECT
         n.node_id,
@@ -136,16 +144,21 @@ FROM (
         s.nearest_hop,
         s.rels,
         ROUND(s.graph_score::numeric, 4)                    AS score,
-        -- Surfaced so a caller can cite which source class answered without parsing props.
-        -- 'inferred' is the honest default: absence of a marker is not evidence of curation.
+        -- Passed through verbatim, NOT normalised to a two-value domain: gold_triplets
+        -- already emits 'structured' and 'llm_enrichment' (see sql/gold_triplets_mapping.sql),
+        -- and those must keep their own label. Only 'uc_certified' is boosted; every other
+        -- value, known or not, carries weight 1.0. Branch on == 'uc_certified', never on
+        -- != 'inferred'.
         COALESCE(n.props ->> 'source_method', 'inferred')   AS source_class,
-        ROUND((s.graph_score * COALESCE(
-            CASE WHEN n.props ->> 'source_method' = 'uc_certified'
-                 THEN :authority_boost ELSE 1.0 END, 1.0))::numeric, 4) AS authority_score
+        s.graph_score * COALESCE(
+            CASE WHEN n.props ->> 'source_method' = 'uc_certified' AND s.graph_score > 0
+                 THEN :authority_boost ELSE 1.0 END, 1.0)   AS authority_rank_key
     FROM scored s
     JOIN graph.nodes n ON n.node_id = s.node_id
 ) ranked
--- Tie broken on node_id so the order is deterministic across runs; an authority boost makes
--- exact ties materially more likely than the raw scores did. Mirrors the Python twin.
-ORDER BY authority_score DESC, node_id
+-- Tie broken on node_id for determinism across runs; a boost makes exact ties likelier than
+-- the raw scores did. NOTE this orders TEXT by the database collation while the Python twin
+-- compares Unicode codepoints, so the two agree only under C collation — it matters just for
+-- ids differing in case or punctuation.
+ORDER BY authority_rank_key DESC, node_id
 LIMIT 25;

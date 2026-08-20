@@ -106,9 +106,11 @@ def main() -> int:
     con.executemany("INSERT INTO seed VALUES (?,?)", [(nid, float(s)) for nid, s in seeds])
 
     max_hops = 2
-    # Mirrors sql/graphrag_retrieval.sql: an `adj` CTE (edges walkable both
-    # directions) joined with a PLAIN JOIN in the recursive term. DuckDB dialect
-    # swaps: ARRAY[x]->[x], `||`->list_append, `= ANY`->list_contains.
+    # Mirrors the `adj` / `walk` / `scored` stages of sql/graphrag_retrieval.sql: an `adj`
+    # CTE (edges walkable both directions) joined with a PLAIN JOIN in the recursive term.
+    # DuckDB dialect swaps: ARRAY[x]->[x], `||`->list_append, `= ANY`->list_contains.
+    # It deliberately does NOT mirror the final assemble stage — authority ranking is
+    # covered separately in TEST 8 against its own fixture, so this stays focused on traversal.
     walk_sql = f"""
     WITH RECURSIVE adj AS (
         SELECT src_id AS from_id, dst_id AS next_id, rel FROM edges
@@ -547,6 +549,11 @@ def main() -> int:
 
     # a boost large enough to close the observed gap must actually promote it, or the
     # feature does nothing.
+    # Guard the arithmetic: `score` is already rounded, so a fixture whose runner-up rounds to
+    # 0.0 would raise ZeroDivisionError, and a negative runner-up would invert the ratio and make
+    # `strong` below silently assert the opposite of what it claims.
+    check("authority gap fixture is positive (guards the ratio below)",
+          baseline[0]["score"] > 0 and baseline[1]["score"] > 0, True)
     gap = baseline[0]["score"] / baseline[1]["score"]
     strong = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
                             authority_boost=gap * 1.10)
@@ -556,6 +563,8 @@ def main() -> int:
     # ...but relevance must still dominate: certifying the WEAKEST node with a modest boost
     # must not hand it rank 1. This is the assertion a sort-key implementation fails.
     weakest = baseline[-1]["node_id"]
+    check("weakest-node fixture is positive (guards the ratio below)",
+          baseline[-1]["score"] > 0, True)
     weak_gap = baseline[0]["score"] / baseline[-1]["score"]
     certified_weak = {nid: (dict(n, props={"source_method": "uc_certified"})
                             if nid == weakest else n)
@@ -565,6 +574,64 @@ def main() -> int:
     check("a modest boost does NOT let the least relevant certified node reach rank 1",
           modest[0]["node_id"] == weakest, False)
     check("the relevance gap it would have to close is real (>1.2x)", weak_gap > 1.2, True)
+
+    # ---- the same rules, executed as SQL. TEST 8 above only exercises graph_retrieve.py;
+    # without this the SQL half of the ranking has no coverage at all and can drift silently
+    # (it already did once: the SQL gained the positive-score guard a commit before the
+    # Python twin did, and every test stayed green).
+    acon = duckdb.connect()
+    acon.execute("CREATE TABLE anodes(node_id TEXT, props JSON)")
+    acon.executemany("INSERT INTO anodes VALUES (?,?)", [
+        ("cert:hi",   '{"source_method":"uc_certified"}'),   # certified, strong
+        ("inf:hi",    '{"source_method":"inferred"}'),        # inferred, strongest
+        ("other:mid", '{"source_method":"structured"}'),      # a real gold_triplets value
+        ("bare:mid",  '{}'),                                  # no source_method at all
+        ("cert:neg",  '{"source_method":"uc_certified"}'),    # certified, NEGATIVE score
+        ("inf:neg",   '{"source_method":"inferred"}'),        # inferred, less negative
+    ])
+    acon.execute("CREATE TABLE ascored(node_id TEXT, graph_score DOUBLE)")
+    acon.executemany("INSERT INTO ascored VALUES (?,?)", [
+        ("cert:hi", 0.50), ("inf:hi", 0.60), ("other:mid", 0.30),
+        ("bare:mid", 0.30), ("cert:neg", -0.10), ("inf:neg", -0.15),
+    ])
+
+    def authority_sql(boost):
+        """The assemble stage of sql/graphrag_retrieval.sql, DuckDB dialect."""
+        return acon.execute(f"""
+            SELECT node_id, source_class, ROUND(rank_key, 4) AS authority_score
+            FROM (
+                SELECT n.node_id,
+                       COALESCE(json_extract_string(n.props, '$.source_method'), 'inferred')
+                           AS source_class,
+                       s.graph_score * COALESCE(
+                           CASE WHEN json_extract_string(n.props, '$.source_method')
+                                     = 'uc_certified' AND s.graph_score > 0
+                                THEN {boost} ELSE 1.0 END, 1.0) AS rank_key
+                FROM ascored s JOIN anodes n ON n.node_id = s.node_id
+            ) r
+            ORDER BY rank_key DESC, node_id
+        """).fetchall()
+
+    base_sql = authority_sql(1.0)
+    check("SQL: boost=1.0 orders by raw score (no-op)",
+          [r[0] for r in base_sql],
+          ["inf:hi", "cert:hi", "bare:mid", "other:mid", "cert:neg", "inf:neg"])
+    check("SQL: a node with no source_method reads as inferred, weight 1.0",
+          next((r[1], r[2]) for r in base_sql if r[0] == "bare:mid"), ("inferred", 0.3))
+    check("SQL: a foreign source_method passes through verbatim, not normalised",
+          next(r[1] for r in base_sql if r[0] == "other:mid"), "structured")
+
+    boosted = authority_sql(2.0)
+    check("SQL: boost promotes the certified node past the stronger inferred one",
+          [r[0] for r in boosted][:2], ["cert:hi", "inf:hi"])
+    # the guard that matters: a boost must never push a certified node DOWN
+    neg_before = [r[0] for r in base_sql].index("cert:neg")
+    neg_after = [r[0] for r in boosted].index("cert:neg")
+    check("SQL: boosting never demotes a negative-score certified node",
+          neg_after <= neg_before, True)
+    check("SQL: the negative certified node keeps its unboosted score",
+          next(r[2] for r in boosted if r[0] == "cert:neg"), -0.1)
+    acon.close()
 
     print("\n" + "=" * 60)
     if FAILURES:

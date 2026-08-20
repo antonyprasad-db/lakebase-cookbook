@@ -103,9 +103,11 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   parameter arity, so an existing caller that does not pass it raises
   `bind message supplies 4 parameters, but prepared statement requires 5` — the ranking is
   backward-compatible, the *bind signature* is not. Bind `1.0` to keep the previous behaviour
-  exactly. The parameter is referenced once, in the inner `SELECT`, precisely so drivers that do not
-  de-duplicate named parameters don't turn one knob into three positional binds. The Python twin
-  defaults it to `1.0`, so Python callers need no change. Calibrate it once a certified core actually
+  exactly. The parameter is referenced once, in the inner `SELECT`, and ordering uses that computed
+  column — tidier than repeating it in the score, the `ORDER BY` and the output, though note
+  `:query_embedding` is already referenced three times, so single-reference is hygiene here rather
+  than a property the file as a whole has. The Python twin defaults it to `1.0`, so Python callers
+  need no change. Calibrate it once a certified core actually
   exists — start around `1.2`-`2.0` and check against your own graph, since the useful value depends
   on the score gaps your embedding model produces, not on a portable constant.
 - **Keep a minimum Lakebase compute above zero for latency-sensitive serving.** After scale-to-zero,
@@ -157,11 +159,34 @@ certified node outrank a highly relevant inferred one — worse than having no a
 Multiplying keeps relevance meaningful and makes the strength one tunable knob. The smoke test pins
 both directions: a sufficient boost *does* promote a certified node to rank 1, and a modest boost
 *does not* let the least relevant certified node reach rank 1. A sort-key implementation passes the
-first and fails the second.
+first and fails the second. Both the Python twin and the SQL assemble stage are covered — the SQL
+against its own fixture, because the traversal mirror in TEST 2 stops before the assemble stage.
 
-**`:authority_boost` defaults to 1.0, which is an exact no-op.** Every weight is then `1.0`, so the
-ordering is arithmetically identical to the pre-authority behaviour whether or not certified rows
-exist. Nothing about this changes existing results until you raise it.
+**`:authority_boost` defaults to 1.0, which leaves every weight at 1.0**, so the ordering matches the
+pre-authority behaviour whether or not certified rows exist. Two caveats, because "no-op" is easy to
+overclaim:
+
+- The ranking orders by the **unrounded** product. Ordering by the rounded `authority_score` column
+  would collapse scores that differ beyond 4 dp into ties — `0.175024` and `0.175006` both round to
+  `0.1750` — and let the tiebreak reorder them, which is *not* a no-op. The rounded value is output
+  only.
+- The `node_id` tiebreak orders `TEXT` by **database collation** in Postgres and by Unicode codepoints
+  in the Python twin, so the two agree only under `C` collation. It matters only for ids differing in
+  case or punctuation.
+
+**Only positive scores are boosted, and that guard is load-bearing.** `seed_similarity` is
+`1 - cosine_distance`, so it spans `[-1, 1]`, and the default `seed_floor = -1.0` admits
+negative-similarity seeds by design. Multiplying a negative score makes it *more* negative: a
+certified node at `-0.10` with a boost of `2.0` becomes `-0.20` and sorts **below** an inferred node
+at `-0.15`, so the boost would demote exactly what it exists to promote, and get worse as you raise
+the knob. Boosting only above zero keeps the transform monotone. The smoke test pins this in both
+halves.
+
+**`source_class` is passed through verbatim, not normalised to two values.** It is whatever
+`props ->> 'source_method'` holds, defaulting to `inferred` only when the key is absent. That matters
+because [`sql/gold_triplets_mapping.sql`](sql/gold_triplets_mapping.sql) already emits `structured`
+and `llm_enrichment`, and those keep their own labels. Only `uc_certified` is boosted; every other
+value, known or not, carries weight `1.0`. **Branch on `== 'uc_certified'`, never on `!= 'inferred'`.**
 
 **Where certified nodes come from is deliberately not this example's business.** Anything that can
 write the `props` key participates — a Unity Catalog semantics exporter, a curation UI, a hand-written
