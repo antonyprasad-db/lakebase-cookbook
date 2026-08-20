@@ -90,8 +90,29 @@ The [retrieval SQL](https://github.com/databricks-solutions/lakebase-cookbook/tr
 
    The `0.5 ^ hop` decay halves a node's contribution per hop, so a direct
    neighbor of a strong seed outranks a distant one; `MAX` means a node reachable
-   from several seeds keeps its *strongest* path. The top 25 by `graph_score` (with
-   the relationship types traversed) become the LLM context.
+   from several seeds keeps its *strongest* path.
+4. **Authority** — a node marked as curated in `props` (`{"source_method": "uc_certified"}`)
+   has its score multiplied by `:authority_boost`, so a certified definition wins the
+   tie against an equally-relevant inferred one. The query returns `source_class` so an
+   answer can cite what resolved it, and the top 25 by the authority-weighted score
+   become the LLM context.
+
+   A multiplier rather than a sort key, deliberately: ordering by `(authority, score)`
+   would let a barely-relevant certified node outrank a highly relevant inferred one,
+   which is worse than no authority signal at all. Two properties worth knowing:
+
+   - **Only positive scores are boosted.** `seed_similarity` spans `[-1, 1]` and the
+     default `seed_floor` of `-1.0` admits negatives, so multiplying would make a
+     negative score *more* negative and demote the very node the boost exists to
+     promote.
+   - **`source_class` is passed through verbatim**, not normalised to two values — the
+     `gold_triplets` convention already emits `structured` and `llm_enrichment`. Only
+     `uc_certified` is boosted; everything else carries weight `1.0`. Branch on equality
+     with `uc_certified`, never on inequality with `inferred`.
+
+   Populating those certified nodes — from Unity Catalog semantics or any other curated
+   source — is deliberately outside this example: anything that can write the `props` key
+   participates, which keeps the ranking independent of any one producer.
 
 This is the GraphRAG win: a supplier or substitute that shares no keywords with
 the question still surfaces because it's one hop from a semantically-matched node
@@ -178,6 +199,7 @@ uv run --python 3.11 --with duckdb --with numpy smoketest/graphrag_logic_smokete
 | `lakebase_database` | Full Lakebase database resource path (required). |
 | `max_hops` | Traversal depth from the seeds. `2` is the sweet spot; higher pulls in more distant (and lower-scored) context at the cost of a wider recursive walk. |
 | `seed_floor` | Minimum cosine similarity a semantic seed must clear before it enters the graph walk. Cosine ranges `[-1, 1]`, so the default `-1.0` keeps every seed (identical to no floor). Raise it on distractor-heavy corpora, where weak seeds bridge into unrelated subgraphs and dilute precision. Calibrate to your embedding model's observed range rather than a fixed constant: measured live with `databricks-gte-large-en`, this graph's similarities span `0.38`-`0.71`, so `0.3` is a no-op and `0.555` is where the distractors drop. **Required bind** — Postgres has no server-side default for a named parameter, so SQL callers must pass it (`-1.0` for the old behavior); the Python twin defaults it. A floor above every similarity empties the seed CTE and returns zero rows, so the caller should retry at `-1.0` or decline to answer. |
+| `authority_boost` | Multiplier applied to a node whose `props` carry `source_method='uc_certified'`, so a curated definition outranks an equally-relevant inferred one. The default `1.0` leaves every weight at `1.0` and the ranking matches the pre-authority behaviour. Calibrate once a certified core exists — around `1.2`-`2.0` is a reasonable start, but the useful value depends on the score gaps your embedding model produces, not a portable constant. Only scores above zero are boosted, since multiplying a negative score would demote the node. **Required bind**, exactly like `seed_floor`: adding it changes the SQL's parameter arity, so an existing caller that omits it raises `bind message supplies 4 parameters, but prepared statement requires 5`. Bind `1.0` to keep the previous ranking. The Python twin defaults it. |
 | `VECTOR(1024)` | Embedding dimension — must match your embeddings endpoint (1024 for `databricks-gte-large-en`). |
 | HNSW `m` / `ef_construction` | Index build quality vs. speed (`16` / `64` here). Raise for higher recall on larger graphs. |
 | Embeddings endpoint | Model-serving endpoint used to embed nodes and questions. |
