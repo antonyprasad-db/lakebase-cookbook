@@ -163,9 +163,12 @@ stage against its own fixture, not by running `sql/graphrag_retrieval.sql` itsel
 two together, so a change to the query must be mirrored in the test by hand. Only a live Lakebase run
 exercises the real file.
 
-**`:authority_boost` defaults to 1.0, which leaves every weight at 1.0**, so the ordering matches the
-pre-authority behaviour whether or not certified rows exist. Two caveats, because "no-op" is easy to
-overclaim:
+**`:authority_boost` defaults to 1.0, which leaves every weight at 1.0.** Scores are then unchanged
+and distinctly-scored rows keep their relative order. It is **not** a byte-identical no-op, though,
+and the difference is not hypothetical — measured live against a 1219-node graph, two pairs in the
+top ten were exact score ties (`0.2945` and `0.1473`), and they now order deterministically by
+`node_id` where the previous query left tied rows in whatever order Postgres returned. That is a
+deliberate improvement over an unstable sort, but it is a change. Three further caveats:
 
 - The ranking orders by the **unrounded** product. Ordering by the rounded `authority_score` column
   would collapse scores that differ beyond 4 dp into ties — `0.175024` and `0.175006` both round to
@@ -174,6 +177,12 @@ overclaim:
 - The `node_id` tiebreak orders `TEXT` by **database collation** in Postgres and by Unicode codepoints
   in the Python twin, so the two agree only under `C` collation. It matters only for ids differing in
   case or punctuation.
+- The query reads `n.props`, so `graph.nodes` must have that column. It is in
+  [`sql/schema.sql`](sql/schema.sql), but a graph built by an older or bespoke script may lack it —
+  one such graph turned up during live testing. The query then fails with
+  `column n.props does not exist` on *every* retrieval, not just certified rows. This is pre-existing
+  (the previous query also selected `n.props`), and the fix is one statement:
+  `ALTER TABLE graph.nodes ADD COLUMN IF NOT EXISTS props JSONB NOT NULL DEFAULT '{}'::jsonb`.
 
 **Only positive scores are boosted, and that guard is load-bearing.** `seed_similarity` is
 `1 - cosine_distance`, so it spans `[-1, 1]`, and the default `seed_floor = -1.0` admits
