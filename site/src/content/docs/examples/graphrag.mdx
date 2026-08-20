@@ -143,8 +143,9 @@ Two things worth knowing if you adapt this:
 - **`information_schema.semantic_*` is not populated for native metric views.** `semantic_views`,
   `semantic_dimensions` and friends look like the structured source you want. In one workspace
   survey every catalog exposing them was a Snowflake federation connection, and the native catalog
-  holding a real Databricks metric view exposed none — so they appear to describe federated
-  Snowflake semantic views. Reading them finds nothing for a Databricks metric view today.
+  holding a real Databricks metric view exposed none — so they appear to be populated for
+  federated Snowflake semantic views rather than native ones. Whether that is permanent or just
+  not implemented yet is unknown; either way they find nothing for a Databricks metric view today.
 
 Only metric views are required, so the prerequisite stays "you have a metric view". Domains,
 governed Pages and certification signals are the other three parts of Unity Catalog business

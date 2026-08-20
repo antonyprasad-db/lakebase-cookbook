@@ -56,8 +56,9 @@ Information` boundary row; both are isolated in `parse_describe` so a format cha
 pure function with direct test coverage, rather than the writer.
 
 AUTHORITY METADATA
-DESCRIBE also yields `Owner` and `Created Time`. Those are carried onto the emitted nodes
-because they are the raw material for "who wrote it, how fresh" — the ranking in
+DESCRIBE also yields `Owner` and `Created Time`. Those are carried onto the emitted **view**
+node (not the field nodes) because they are the raw material for "who wrote it, how fresh" — the
+ranking in
 `sql/graphrag_retrieval.sql` does not consult them today, but a richer authority function would.
 """
 
@@ -105,8 +106,25 @@ _DETAIL_BOUNDARY = "# Detailed Table Information"
 # "# of Customers", and treating those as the boundary silently truncates the field list and
 # folds every later field into the metadata dict. Section headers always have an empty
 # data_type, whereas a field always has one, so that is the real discriminator.
+def _is_section_header(col: str, data_type: str) -> bool:
+    """Any '# ...' section header. Headers carry an empty data_type; a field always has one.
+
+    That discriminator matters because measures are routinely named "# Orders" or
+    "# of Customers", and treating every '#' as structural truncates the field list.
+    """
+    return col.startswith("#") and not data_type
+
+
 def _is_detail_boundary(col: str, data_type: str) -> bool:
-    return col == _DETAIL_BOUNDARY or (col.startswith("#") and not data_type)
+    """ONLY the detail block ends the field list.
+
+    DESCRIBE EXTENDED also emits '# Partition Information', '# Metadata Columns' and
+    '# Clustering Information' on various runtimes. Treating any section header as the
+    boundary latches the parser into metadata mode permanently and silently drops every
+    field after it — the same truncation class as mistaking "# Orders" for a header,
+    reached through a different door. Those sections are skipped instead.
+    """
+    return col == _DETAIL_BOUNDARY and not data_type
 
 
 class SqlReader(Protocol):
@@ -197,32 +215,45 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
       ship_date        | date           | Ship date ... | {"display_name":.., "synonyms":[..]}
       total_item_count | bigint measure | All total ... | {...}
                             |                  |                |
-      # Detailed Table Info |                  |                |
+      # Detailed Table Information         |               |
       Owner                 | someone@ex.com   |                |
       Created Time          | Wed Dec 17 ...   |                |
 
-    Field rows come first; a row whose col_name starts with '#' begins the metadata block, and
-    everything after it is key/value. A measure is marked ONLY by the ' measure' suffix on
-    data_type — `information_schema` does not expose it at all.
+    Field rows come first. Section headers are the rows whose col_name starts with '#' AND whose
+    data_type is empty — a field always has a type, which is what keeps a measure named
+    "# Orders" from being read as structure. Only `# Detailed Table Information` ends the field
+    block; other sections (`# Partition Information`, `# Metadata Columns`) are skipped, because
+    treating them as the boundary drops every field after them. A measure is marked ONLY by the
+    ' measure' suffix on data_type — `information_schema` does not expose it at all.
+
+    Raises ValueError if the boundary is absent (the metadata block would otherwise be emitted
+    as certified fields) or if a field name repeats (duplicate primary keys downstream).
     """
     fields: list[SemanticField] = []
     meta: dict[str, str] = {}
     in_detail = False
+    saw_boundary = False
 
     for row in rows:
-        col = (row[0] or "").strip() if len(row) > 0 else ""
-        val = (row[1] or "").strip() if len(row) > 1 else ""
+        # str() coerces, rather than assuming: the SqlReader docstring advertises the SQL
+        # connector and the Statement Execution API, which return typed values, so an int or a
+        # datetime here would otherwise raise AttributeError on .strip().
+        col = str(row[0] or "").strip() if len(row) > 0 else ""
+        val = str(row[1] or "").strip() if len(row) > 1 else ""
         if not col:
             continue                                  # spacer row between the two blocks
         if _is_detail_boundary(col, val):
             in_detail = True
+            saw_boundary = True
             continue
+        if _is_section_header(col, val):
+            continue    # a different '# ...' section: skip the header, keep reading fields
         if in_detail:
             meta[col] = val
             continue
 
-        comment = (row[2] or "").strip() if len(row) > 2 else ""
-        raw_meta = (row[3] or "").strip() if len(row) > 3 else ""
+        comment = str(row[2] or "").strip() if len(row) > 2 else ""
+        raw_meta = str(row[3] or "").strip() if len(row) > 3 else ""
         is_measure = val.endswith(_MEASURE_SUFFIX)
         data_type = val[: -len(_MEASURE_SUFFIX)].strip() if is_measure else val
 
@@ -235,7 +266,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
             except ValueError:
                 parsed = {}
             if isinstance(parsed, dict):
-                display_name = str(parsed.get("display_name") or "")
+                display_name = str(parsed.get("display_name") or "").strip()
                 syn = parsed.get("synonyms")
                 # Only string elements: a malformed list like [null, 5, {"a": 1}] would
                 # otherwise reach props.synonyms and the embedded text as "None", "5" and
@@ -248,6 +279,29 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
             is_measure=is_measure, display_name=display_name, synonyms=synonyms,
         ))
 
+    # Refuse to guess when the shape is not what we expect. Without this, a renamed or absent
+    # boundary turns the metadata block itself into fields: 'Owner' becomes a dimension node
+    # whose data_type is somebody's email address, tagged uc_certified and therefore BOOSTED by
+    # the ranking. Marking garbage authoritative is the worst available outcome, so this raises
+    # rather than degrading.
+    if not saw_boundary:
+        raise ValueError(
+            f"DESCRIBE output for {catalog}.{schema}.{name} has no {_DETAIL_BOUNDARY!r} row; "
+            "refusing to parse, because without it the metadata block would be emitted as "
+            "certified fields"
+        )
+
+    # F4 — duplicate names would collide on graph.nodes' PK and on edges' (src,dst,rel) PK,
+    # so the caller's load either aborts or silently drops rows. Surface it here instead.
+    names = [f.name for f in fields]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise ValueError(
+            f"DESCRIBE output for {catalog}.{schema}.{name} repeats field name(s) {dupes}; "
+            "these would produce duplicate node_id and duplicate (src_id, dst_id, rel), both "
+            "primary keys in sql/schema.sql"
+        )
+
     return CertifiedView(
         catalog=catalog, schema=schema, name=name, fields=tuple(fields),
         owner=meta.get("Owner", ""), created_at=meta.get("Created Time", ""),
@@ -255,7 +309,20 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
 
 
 def read_metric_view(reader: SqlReader, catalog: str, schema: str, name: str) -> CertifiedView:
-    """Discovery already gave us the identity; this fills in the semantics."""
+    """Discovery already gave us the identity; this fills in the semantics.
+
+    All three identifiers are validated, not quoted-and-hoped. Backtick quoting is not a
+    safety boundary: Spark escapes a backtick by doubling it, so a name containing one breaks
+    out of the quotes — `DESCRIBE EXTENDED \`c\`.\`s\`.\`n\` ; DROP TABLE ... --\`` is a
+    valid statement pair. Discovery normally supplies these from
+    information_schema, but the function is public and must not assume that.
+    """
+    for part, label in ((catalog, "catalog"), (schema, "schema"), (name, "name")):
+        if not _CATALOG_RE.fullmatch(part):
+            raise ValueError(
+                f"{label} must match {_CATALOG_RE.pattern} (got {part!r}); identifiers are "
+                "interpolated into this query and backticks do not make that safe"
+            )
     return parse_describe(
         reader.rows(f"DESCRIBE EXTENDED `{catalog}`.`{schema}`.`{name}`"),
         catalog, schema, name,
@@ -322,6 +389,10 @@ def certified_rows(view: CertifiedView) -> GraphRows:
             "source_method": CERTIFIED_SOURCE_METHOD,
             "source_agent": SOURCE_AGENT,
             "data_type": f.data_type,
+            # The raw column name, because `name` may hold a curator's display_name and the
+            # column is otherwise recoverable only by string-parsing node_id — which blocks a
+            # consumer from generating SQL against the metric view.
+            "field_name": f.name,
             "metric_view": view.fqn,
         }
         if f.comment:

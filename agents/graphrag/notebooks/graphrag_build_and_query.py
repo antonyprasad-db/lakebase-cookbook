@@ -232,7 +232,9 @@ if CERTIFIED_CATALOG:
 
     print(f"\n{len(certified_nodes)} certified node(s) and "
           f"{len(certified_edges)} edge(s) ready to load.")
-    print("Load them the same way step 3 loads the business graph, then embed each node with "
+    print("There is no loader in this example to reuse — step 3 is commented-out scaffolding — "
+          "so INSERT these into graph.nodes / graph.edges yourself (props as JSONB), then embed "
+          "each node with "
           "graph_certified.embedding_text(node) — NOT its bare name. A question says "
           "'how much did we make', not 'total_revenue', so the display name, description and "
           "the curator's synonyms are what make the certified core reachable at all. Authority "

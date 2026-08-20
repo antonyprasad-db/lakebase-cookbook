@@ -248,13 +248,15 @@ DESCRIBE is not optional. It is this module's one brittle coupling, so it is iso
 `Owner` and `Created Time` are carried onto the view node. Retrieval does not consult them today,
 but they are the raw material for a richer authority function than "certified or not".
 
-### `information_schema.semantic_*` is Snowflake's, not Unity Catalog's
+### `information_schema.semantic_*` is not populated for native metric views
 
 `semantic_views`, `semantic_dimensions`, `semantic_metrics` and `semantic_relationships` look like
 exactly the structured source this should read. **They are not.** In one workspace survey, all 12
 catalogs exposing them were Snowflake connections surfaced through Lakehouse Federation, and the
-native catalog holding an actual Databricks metric view exposed none of them. Reading them yields a
-builder that works only against federated Snowflake and silently finds nothing in Unity Catalog.
+native catalog holding an actual Databricks metric view exposed none of them. The defensible reading: they are
+populated for **federated Snowflake** semantic views and not for native Databricks metric views.
+Whether that is permanent or simply not implemented yet is unknown — either way, reading them finds
+nothing for a Databricks metric view today, which is why this module does not.
 
 ### Scope, and why only metric views are required
 
