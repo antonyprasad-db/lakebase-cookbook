@@ -145,8 +145,9 @@ print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
 
 # MAGIC %md
 # MAGIC ## 4b. See authority ranking work — ✍️ OPTIONAL
-# MAGIC `:authority_boost` does nothing until some node is marked as curated, and this example
-# MAGIC deliberately ships no producer for that — anything that can write the `props` key
+# MAGIC `:authority_boost` does nothing until some node is marked as curated. Step 5 builds those
+# MAGIC from Unity Catalog metric views; this step marks one by hand instead, so you can see the
+# MAGIC ranking move without any metric view at all. Anything that can write the `props` key
 # MAGIC participates, which keeps the ranking independent of where curation comes from.
 # MAGIC
 # MAGIC To watch it work end to end without wiring a producer, mark one node by hand and re-run
@@ -221,14 +222,26 @@ if CERTIFIED_CATALOG:
     print(f"found {len(views)} user metric view(s) in {CERTIFIED_CATALOG}")
 
     certified_nodes, certified_edges = [], []
+    skipped = []
     for cat, sch, name in views:
-        view = read_metric_view(reader, cat, sch, name)
-        rows = certified_rows(view)
+        # Discovery returns whatever information_schema holds, but read_metric_view validates
+        # identifiers and parse_describe refuses shapes it cannot trust (no detail block, repeated
+        # field names). A non-ASCII view name like `ventas_año` is legitimate in Unity Catalog and
+        # is rejected here, so one awkward view must not discard every other view's work.
+        try:
+            view = read_metric_view(reader, cat, sch, name)
+            rows = certified_rows(view)
+        except ValueError as e:
+            skipped.append((f"{cat}.{sch}.{name}", str(e)))
+            continue
         certified_nodes.extend(rows.nodes)
         certified_edges.extend(rows.edges)
         measures = sum(1 for f in view.fields if f.is_measure)
         print(f"  {view.fqn}: {measures} measure(s), "
               f"{len(view.fields) - measures} dimension(s), owner={view.owner or 'unknown'}")
+
+    for fqn, why in skipped:
+        print(f"  SKIPPED {fqn}: {why}")
 
     print(f"\n{len(certified_nodes)} certified node(s) and "
           f"{len(certified_edges)} edge(s) ready to load.")

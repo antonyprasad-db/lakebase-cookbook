@@ -113,9 +113,10 @@ The [retrieval SQL](https://github.com/databricks-solutions/lakebase-cookbook/tr
    - **A boost below `1.0` is clamped up to `1.0`**, for the same reason: a fractional or
      negative multiplier would demote the node it is meant to promote.
 
-   Populating those certified nodes — from Unity Catalog semantics or any other curated
-   source — is deliberately outside this example: anything that can write the `props` key
-   participates, which keeps the ranking independent of any one producer.
+   Populating those certified nodes is a separate concern from ranking them: anything that can
+   write the `props` key participates, which keeps the ranking independent of any one producer.
+   The example ships one such producer — see [the certified core](#the-certified-core-unity-catalog-metric-views)
+   — and marking a node by hand works just as well.
 
 This is the GraphRAG win: a supplier or substitute that shares no keywords with
 the question still surfaces because it's one hop from a semantically-matched node

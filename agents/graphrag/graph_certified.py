@@ -115,16 +115,14 @@ def _is_section_header(col: str, data_type: str) -> bool:
     return col.startswith("#") and not data_type
 
 
-def _is_detail_boundary(col: str, data_type: str) -> bool:
-    """ONLY the detail block ends the field list.
+def _is_detail_boundary(col: str) -> bool:
+    """Which section header starts the key/value metadata block.
 
-    DESCRIBE EXTENDED also emits '# Partition Information', '# Metadata Columns' and
-    '# Clustering Information' on various runtimes. Treating any section header as the
-    boundary latches the parser into metadata mode permanently and silently drops every
-    field after it — the same truncation class as mistaking "# Orders" for a header,
-    reached through a different door. Those sections are skipped instead.
+    No data_type check here: this is only ever reached once `_is_section_header` has returned
+    True, which already requires an empty data_type. An earlier revision repeated the check,
+    which made it dead code — a mutation removing it changed nothing, which is how it was found.
     """
-    return col == _DETAIL_BOUNDARY and not data_type
+    return col == _DETAIL_BOUNDARY
 
 
 class SqlReader(Protocol):
@@ -161,6 +159,10 @@ class CertifiedView:
     fields: tuple[SemanticField, ...] = ()
     owner: str = ""
     created_at: str = ""
+    # The metric view's own description. Lifted because without it a MetricView node has
+    # nothing but its name to embed, and both the README and the notebook tell the reader to
+    # embed with embedding_text() rather than the bare name.
+    comment: str = ""
 
     @property
     def fqn(self) -> str:
@@ -181,7 +183,11 @@ def discover_metric_views(
     which on a large workspace is thousands of rows — pass a catalog in anything but a demo.
     """
     where = ["table_type = 'METRIC_VIEW'"]
-    if catalog:
+    # `is not None`, not truthiness: catalog="" previously skipped validation AND the predicate,
+    # so a caller wiring this to dbutils.widgets.get() or os.environ.get("CATALOG", "") silently
+    # got the unscoped whole-workspace scan this docstring warns against. Failing open on a
+    # blank config value is the wrong direction.
+    if catalog is not None:
         # VALIDATED, not escaped. Doubling single quotes is the Postgres habit and it does not
         # hold here: Spark SQL honours backslash escapes, so a catalog of "x\\' OR true --"
         # survives doubling as 'x\\'' OR true --' and injects — the predicate becomes
@@ -232,6 +238,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
     fields: list[SemanticField] = []
     meta: dict[str, str] = {}
     in_detail = False
+    in_sections = False
     saw_boundary = False
 
     for row in rows:
@@ -242,19 +249,39 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         val = str(row[1] or "").strip() if len(row) > 1 else ""
         if not col:
             continue                                  # spacer row between the two blocks
-        if _is_detail_boundary(col, val):
-            in_detail = True
-            saw_boundary = True
-            continue
+        # THE FIELD BLOCK IS ONLY WHAT PRECEDES THE FIRST SECTION HEADER, and this is stricter
+        # than it looks on purpose. DESCRIBE EXTENDED emits '# Partition Information' and
+        # '# Metadata Columns' on various runtimes, each followed by a bare
+        # '# col_name | data_type | comment' SUB-HEADER whose data_type cell is NOT empty, and
+        # then the section's body rows. Skipping only the header row leaves both the sub-header
+        # and the body being read as fields: measured, that produced
+        # `dimension:<fqn>.# col_name` with props.data_type = "data_type", plus every partition
+        # column, all tagged uc_certified and therefore boosted as authoritative. Anchoring on
+        # "before the first header" makes the section's contents unreachable regardless of what
+        # shape they take.
         if _is_section_header(col, val):
-            continue    # a different '# ...' section: skip the header, keep reading fields
+            in_sections = True
+            if _is_detail_boundary(col):
+                in_detail = True
+                saw_boundary = True
+            continue
+        if in_sections and not in_detail:
+            continue    # inside a non-detail section: sub-header or body, never a field
         if in_detail:
             meta[col] = val
             continue
 
+        if not val:
+            # By this module's own discriminator a field always has a data_type, so a typeless
+            # row that is not a '#' header is not a field either. Emitting it would create a
+            # certified Dimension whose data_type is "".
+            continue
         comment = str(row[2] or "").strip() if len(row) > 2 else ""
         raw_meta = str(row[3] or "").strip() if len(row) > 3 else ""
-        is_measure = val.endswith(_MEASURE_SUFFIX)
+        # Case-insensitive: this is the module's one brittle coupling, and a runtime emitting
+        # "BIGINT MEASURE" would otherwise classify every measure as a Dimension, silently,
+        # while still tagging it certified. Cheap insurance on the one signal that matters.
+        is_measure = val.lower().endswith(_MEASURE_SUFFIX)
         data_type = val[: -len(_MEASURE_SUFFIX)].strip() if is_measure else val
 
         display_name, synonyms = "", ()
@@ -266,7 +293,11 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
             except ValueError:
                 parsed = {}
             if isinstance(parsed, dict):
-                display_name = str(parsed.get("display_name") or "").strip()
+                # isinstance, matching the synonyms guard below: a non-string value
+                # stringifies a Python repr into the node name and the embedded text
+                # ({"a": 1} became "{'a': 1}").
+                dn = parsed.get("display_name")
+                display_name = dn.strip() if isinstance(dn, str) else ""
                 syn = parsed.get("synonyms")
                 # Only string elements: a malformed list like [null, 5, {"a": 1}] would
                 # otherwise reach props.synonyms and the embedded text as "None", "5" and
@@ -305,6 +336,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
     return CertifiedView(
         catalog=catalog, schema=schema, name=name, fields=tuple(fields),
         owner=meta.get("Owner", ""), created_at=meta.get("Created Time", ""),
+        comment=meta.get("Comment", ""),
     )
 
 
@@ -376,6 +408,8 @@ def certified_rows(view: CertifiedView) -> GraphRows:
         view_props["owner"] = view.owner
     if view.created_at:
         view_props["created_at"] = view.created_at
+    if view.comment:
+        view_props["comment"] = view.comment
 
     out.nodes.append({
         "node_id": node_id_for_view(view),
