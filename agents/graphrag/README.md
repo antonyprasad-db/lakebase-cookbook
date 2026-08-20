@@ -99,6 +99,15 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   that in your caller and either retry at `-1.0` or decline to answer, rather than synthesizing
   from no context. See `:seed_floor` in
   [`sql/graphrag_retrieval.sql`](sql/graphrag_retrieval.sql).
+- **`:authority_boost` is a required bind, exactly like `:seed_floor`.** Adding it changes the SQL's
+  parameter arity, so an existing caller that does not pass it raises
+  `bind message supplies 4 parameters, but prepared statement requires 5` — the ranking is
+  backward-compatible, the *bind signature* is not. Bind `1.0` to keep the previous behaviour
+  exactly. The parameter is referenced once, in the inner `SELECT`, precisely so drivers that do not
+  de-duplicate named parameters don't turn one knob into three positional binds. The Python twin
+  defaults it to `1.0`, so Python callers need no change. Calibrate it once a certified core actually
+  exists — start around `1.2`-`2.0` and check against your own graph, since the useful value depends
+  on the score gaps your embedding model produces, not on a portable constant.
 - **Keep a minimum Lakebase compute above zero for latency-sensitive serving.** After scale-to-zero,
   the first query pays a cold-start penalty of several× the warm latency while index pages load in
   (measured on a live instance at ~6× on a small graph; scale-dependent).
@@ -125,6 +134,39 @@ Undirected relations (`SUBSTITUTE_FOR`) are stored once with sorted endpoints an
 at query time by the retrieval SQL, so the view emits **both directions** for them — a directed
 consumer would otherwise miss the reverse. De-duplicate symmetric predicates on ingest.
 It's a column contract, not a dependency. See [`sql/gold_triplets_mapping.sql`](sql/gold_triplets_mapping.sql).
+
+## Authority: a certified core over the inferred graph
+
+Retrieval so far ranks by **relevance** only — semantic seed similarity decayed by hop distance. That
+cannot tell a triplet inferred from a document apart from a definition somebody curated on purpose,
+which is the question that actually gets asked of a governed context layer: *is this the authoritative
+definition, and where did it come from?*
+
+A node marked as certified carries it in `props`, the same place edges already carry provenance:
+
+```json
+{"source_method": "uc_certified"}
+```
+
+Retrieval then multiplies that node's score by `:authority_boost` and returns two extra columns:
+`source_class` (`uc_certified` / `inferred`) so an answer can cite what resolved it, and
+`authority_score`, which is what the ranking actually orders by.
+
+**A multiplier, not a sort key.** Ordering by `(authority, score)` would let a barely-relevant
+certified node outrank a highly relevant inferred one — worse than having no authority signal at all.
+Multiplying keeps relevance meaningful and makes the strength one tunable knob. The smoke test pins
+both directions: a sufficient boost *does* promote a certified node to rank 1, and a modest boost
+*does not* let the least relevant certified node reach rank 1. A sort-key implementation passes the
+first and fails the second.
+
+**`:authority_boost` defaults to 1.0, which is an exact no-op.** Every weight is then `1.0`, so the
+ordering is arithmetically identical to the pre-authority behaviour whether or not certified rows
+exist. Nothing about this changes existing results until you raise it.
+
+**Where certified nodes come from is deliberately not this example's business.** Anything that can
+write the `props` key participates — a Unity Catalog semantics exporter, a curation UI, a hand-written
+insert. That keeps the ranking seam independent of any one producer's availability, and it is why this
+half carries no new prerequisite beyond what the example already needs.
 
 ## Layout
 

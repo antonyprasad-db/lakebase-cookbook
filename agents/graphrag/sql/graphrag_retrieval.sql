@@ -121,23 +121,31 @@ scored AS (
 --    Postgres sorts NULLs FIRST under ORDER BY ... DESC. That is the same rank-1
 --    garbage failure the seed NaN guard above exists to prevent, arriving through a
 --    different door. The smoketest pins it.
+--    `:authority_boost` is bound ONCE, in the inner SELECT, and the outer query orders by
+--    the computed column. Referencing the parameter three times (score, ORDER BY, output)
+--    would bind it three times under drivers that do not de-duplicate named parameters,
+--    turning one knob into three positional binds a caller has to supply in order.
 SELECT
-    n.node_id,
-    n.node_type,
-    n.name,
-    n.props,
-    s.nearest_hop,
-    s.rels,
-    ROUND(s.graph_score::numeric, 4)                        AS score,
-    -- Surfaced so a caller can cite which source class answered without parsing props.
-    -- 'inferred' is the honest default: absence of a marker is not evidence of curation.
-    COALESCE(n.props ->> 'source_method', 'inferred')       AS source_class,
-    ROUND((s.graph_score * COALESCE(
-        CASE WHEN n.props ->> 'source_method' = 'uc_certified'
-             THEN :authority_boost ELSE 1.0 END, 1.0))::numeric, 4) AS authority_score
-FROM scored s
-JOIN graph.nodes n ON n.node_id = s.node_id
-ORDER BY s.graph_score * COALESCE(
-    CASE WHEN n.props ->> 'source_method' = 'uc_certified'
-         THEN :authority_boost ELSE 1.0 END, 1.0) DESC
+    node_id, node_type, name, props, nearest_hop, rels, score, source_class, authority_score
+FROM (
+    SELECT
+        n.node_id,
+        n.node_type,
+        n.name,
+        n.props,
+        s.nearest_hop,
+        s.rels,
+        ROUND(s.graph_score::numeric, 4)                    AS score,
+        -- Surfaced so a caller can cite which source class answered without parsing props.
+        -- 'inferred' is the honest default: absence of a marker is not evidence of curation.
+        COALESCE(n.props ->> 'source_method', 'inferred')   AS source_class,
+        ROUND((s.graph_score * COALESCE(
+            CASE WHEN n.props ->> 'source_method' = 'uc_certified'
+                 THEN :authority_boost ELSE 1.0 END, 1.0))::numeric, 4) AS authority_score
+    FROM scored s
+    JOIN graph.nodes n ON n.node_id = s.node_id
+) ranked
+-- Tie broken on node_id so the order is deterministic across runs; an authority boost makes
+-- exact ties materially more likely than the raw scores did. Mirrors the Python twin.
+ORDER BY authority_score DESC, node_id
 LIMIT 25;
