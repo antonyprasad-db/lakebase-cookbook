@@ -515,6 +515,57 @@ def main() -> int:
     check("canonical_id is a stable, type-prefixed slug",
           canonical_id("ACME Foods Inc.", "Company"), "company:acme_foods_inc")
 
+    # ----------------------------------------------------------------- authority
+    # A certified node should win the tie against an equally-relevant inferred one, WITHOUT
+    # letting a barely-relevant certified node outrank a much more relevant inferred one.
+    # That is why authority is a multiplier and not a sort key, and these checks pin the
+    # difference — a hard (authority, score) sort would pass the first check and fail the last.
+    print("\nTEST 8 — authority ranking (certified core over inferred graph)")
+
+    baseline = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2)
+    baseline_ids = [r["node_id"] for r in baseline]
+
+    # every node here is unmarked, so every row must read as inferred and its authority
+    # score must equal its raw score — the no-source_method path that would go NULL in SQL.
+    check("unmarked nodes report source_class=inferred",
+          {r["source_class"] for r in baseline}, {"inferred"})
+    check("unmarked nodes: authority_score == score (no NULL/None leak)",
+          all(r["authority_score"] == r["score"] for r in baseline), True)
+
+    # certify the runner-up, then prove the default is an exact no-op even with a certified
+    # row present. This is the backward-compatibility guarantee, not an assumption.
+    runner_up = baseline[1]["node_id"]
+    certified = {nid: (dict(n, props={"source_method": "uc_certified"}) if nid == runner_up
+                       else n)
+                 for nid, n in bnodes.items()}
+    default_boost = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2)
+    check("authority_boost=1.0 is an exact no-op with certified rows present",
+          [r["node_id"] for r in default_boost], baseline_ids)
+    check("certified row is labelled",
+          next(r["source_class"] for r in default_boost if r["node_id"] == runner_up),
+          "uc_certified")
+
+    # a boost large enough to close the observed gap must actually promote it, or the
+    # feature does nothing.
+    gap = baseline[0]["score"] / baseline[1]["score"]
+    strong = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
+                            authority_boost=gap * 1.10)
+    check("a sufficient boost promotes the certified node to rank 1",
+          strong[0]["node_id"], runner_up)
+
+    # ...but relevance must still dominate: certifying the WEAKEST node with a modest boost
+    # must not hand it rank 1. This is the assertion a sort-key implementation fails.
+    weakest = baseline[-1]["node_id"]
+    weak_gap = baseline[0]["score"] / baseline[-1]["score"]
+    certified_weak = {nid: (dict(n, props={"source_method": "uc_certified"})
+                            if nid == weakest else n)
+                      for nid, n in bnodes.items()}
+    modest = agent_retrieve(q, certified_weak, bedges, a_emb, seed_k=6, max_hops=2,
+                            authority_boost=1.2)
+    check("a modest boost does NOT let the least relevant certified node reach rank 1",
+          modest[0]["node_id"] == weakest, False)
+    check("the relevance gap it would have to close is real (>1.2x)", weak_gap > 1.2, True)
+
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED -> {FAILURES}")

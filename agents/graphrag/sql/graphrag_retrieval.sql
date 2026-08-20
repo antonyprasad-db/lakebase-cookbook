@@ -103,7 +103,24 @@ scored AS (
     GROUP BY node_id
 )
 
--- 4) ASSEMBLE CONTEXT — join back to node detail, rank by blended score.
+-- 4) ASSEMBLE CONTEXT — join back to node detail, rank by blended score, then let
+--    source authority break the tie between an equally-relevant certified node and an
+--    inferred one.
+--
+--    AUTHORITY, and why it is a multiplier rather than a sort key: ordering by
+--    (authority, score) would let a barely-relevant certified node outrank a highly
+--    relevant inferred one, which is worse than no authority at all. Multiplying keeps
+--    relevance meaningful and makes the strength one tunable knob, like `seed_floor`.
+--    `:authority_boost` defaults to 1.0, which is an exact no-op: every weight is then
+--    1.0 and the ordering is arithmetically identical to the pre-authority behaviour,
+--    certified rows present or not. Calibrate it up (1.2–2.0) once a certified core
+--    exists; see "Configuration and tuning".
+--
+--    COALESCE IS LOAD-BEARING — do not remove it. A node whose props carry no
+--    `source_method` yields NULL from the CASE, `graph_score * NULL` is NULL, and
+--    Postgres sorts NULLs FIRST under ORDER BY ... DESC. That is the same rank-1
+--    garbage failure the seed NaN guard above exists to prevent, arriving through a
+--    different door. The smoketest pins it.
 SELECT
     n.node_id,
     n.node_type,
@@ -111,8 +128,16 @@ SELECT
     n.props,
     s.nearest_hop,
     s.rels,
-    ROUND(s.graph_score::numeric, 4) AS score
+    ROUND(s.graph_score::numeric, 4)                        AS score,
+    -- Surfaced so a caller can cite which source class answered without parsing props.
+    -- 'inferred' is the honest default: absence of a marker is not evidence of curation.
+    COALESCE(n.props ->> 'source_method', 'inferred')       AS source_class,
+    ROUND((s.graph_score * COALESCE(
+        CASE WHEN n.props ->> 'source_method' = 'uc_certified'
+             THEN :authority_boost ELSE 1.0 END, 1.0))::numeric, 4) AS authority_score
 FROM scored s
 JOIN graph.nodes n ON n.node_id = s.node_id
-ORDER BY s.graph_score DESC
+ORDER BY s.graph_score * COALESCE(
+    CASE WHEN n.props ->> 'source_method' = 'uc_certified'
+         THEN :authority_boost ELSE 1.0 END, 1.0) DESC
 LIMIT 25;

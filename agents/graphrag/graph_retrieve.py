@@ -19,7 +19,7 @@ def cosine(a, b) -> float:
 
 
 def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, limit=25,
-             seed_floor=-1.0):
+             seed_floor=-1.0, authority_boost=1.0):
     """Mirror of graphrag_retrieval.sql.
 
     Args:
@@ -34,7 +34,15 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
         band is model-specific (measured on live Lakebase with databricks-gte-large-en, the
         example graph's similarities span 0.38-0.71, so a floor of 0.3 is a no-op and ~0.55
         is where the distractors drop out).
-    Returns: list of dicts {node_id,node_type,name,nearest_hop,rels,score} desc by score.
+      authority_boost: multiplier applied to a node whose props carry
+        source_method='uc_certified', so a curated definition wins the tie against an
+        equally-relevant inferred one. A multiplier rather than a sort key on purpose:
+        ordering by (authority, score) would let a barely-relevant certified node outrank a
+        highly relevant inferred one. The default 1.0 is an exact no-op — every weight is
+        then 1.0 and the ordering matches the pre-authority behaviour, certified rows
+        present or not — so this is opt-in like seed_floor.
+    Returns: list of dicts {node_id,node_type,name,nearest_hop,rels,score,source_class,
+      authority_score} ordered by authority_score desc.
     """
     # 1) semantic seed — top-k by cosine similarity, above the seed_floor.
     #    `any(emb)` skips a degenerate all-zero embedding: it has no direction, so its
@@ -76,12 +84,21 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
             rels.setdefault(nxt, set()).add(rel)
             frontier.append((nxt, hop + 1, seed_sim, visited + (nxt,)))
 
-    # 3) assemble + rank
+    # 3) assemble + rank, then let source authority break the tie between an
+    #    equally-relevant certified node and an inferred one.
+    #
+    #    The `or {}` and the 'inferred' fallback mirror the SQL's COALESCE, and they are
+    #    load-bearing for the same reason: a node with no source_method must score exactly
+    #    as it did before authority existed, never None. In the SQL a NULL weight would
+    #    sort FIRST under ORDER BY ... DESC and hand rank 1 to a garbage node; here it
+    #    would raise on the multiply. Both failures are pinned by the smoketest.
     out = []
     for nid, score in best.items():
         if nid not in nodes:
             continue
         n = nodes[nid]
+        source_class = (n.get("props") or {}).get("source_method") or "inferred"
+        weight = authority_boost if source_class == "uc_certified" else 1.0
         out.append({
             "node_id": nid,
             "node_type": n["node_type"],
@@ -89,6 +106,10 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
             "nearest_hop": nearest[nid],
             "rels": sorted(rels.get(nid, [])),
             "score": round(score, 4),
+            "source_class": source_class,
+            "authority_score": round(score * weight, 4),
         })
-    out.sort(key=lambda r: r["score"], reverse=True)
+    # Ties broken by node_id so the order is deterministic across runs — an authority
+    # boost makes exact ties materially more likely than the raw scores did.
+    out.sort(key=lambda r: (-r["authority_score"], r["node_id"]))
     return out[:limit]
