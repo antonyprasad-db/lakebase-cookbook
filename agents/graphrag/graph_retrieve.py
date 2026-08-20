@@ -42,7 +42,9 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
         then 1.0 and the ordering matches the pre-authority behaviour, certified rows
         present or not — so this is opt-in like seed_floor.
     Returns: list of dicts {node_id,node_type,name,nearest_hop,rels,score,source_class,
-      authority_score} ordered by authority_score desc.
+      authority_score}, ordered by the UNROUNDED authority-weighted score then node_id.
+      `authority_score` is the rounded value for display; ordering deliberately does not use
+      it (see the note in the assemble step).
     """
     # 1) semantic seed — top-k by cosine similarity, above the seed_floor.
     #    `any(emb)` skips a degenerate all-zero embedding: it has no direction, so its
@@ -99,7 +101,11 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
     #      * the sort uses the UNROUNDED key; ordering by the rounded output would collapse
     #        scores differing beyond 4 dp into ties (0.175024 / 0.175006 -> 0.1750) and let
     #        the tiebreak reorder them, which is not a no-op.
-    boost = 1.0 if authority_boost is None else authority_boost
+    # Clamped to >= 1.0, mirroring GREATEST(:authority_boost, 1.0) in the SQL. `score > 0`
+    # below stops a NEGATIVE score being made worse; this stops a boost BELOW 1.0 doing the
+    # same thing to a positive one. Together they guarantee a boost can never rank a certified
+    # node lower than it would have sat unboosted, whatever the caller passes.
+    boost = 1.0 if authority_boost is None else max(authority_boost, 1.0)
     out = []
     for nid, score in best.items():
         if nid not in nodes:

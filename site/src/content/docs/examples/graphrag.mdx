@@ -105,10 +105,13 @@ The [retrieval SQL](https://github.com/databricks-solutions/lakebase-cookbook/tr
      default `seed_floor` of `-1.0` admits negatives, so multiplying would make a
      negative score *more* negative and demote the very node the boost exists to
      promote.
-   - **`source_class` is passed through verbatim**, not normalised to two values — the
-     `gold_triplets` convention already emits `structured` and `llm_enrichment`. Only
-     `uc_certified` is boosted; everything else carries weight `1.0`. Branch on equality
-     with `uc_certified`, never on inequality with `inferred`.
+   - **`source_class` is passed through verbatim**, not normalised to two values, so any
+     producer's label survives. In practice today it is `uc_certified` or `inferred`, since
+     nothing writes `source_method` into node props yet. Only `uc_certified` is boosted;
+     everything else carries weight `1.0`. Branch on equality with `uc_certified`, never on
+     inequality with `inferred`.
+   - **A boost below `1.0` is clamped up to `1.0`**, for the same reason: a fractional or
+     negative multiplier would demote the node it is meant to promote.
 
    Populating those certified nodes — from Unity Catalog semantics or any other curated
    source — is deliberately outside this example: anything that can write the `props` key

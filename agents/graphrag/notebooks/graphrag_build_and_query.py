@@ -143,6 +143,41 @@ print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 4b. See authority ranking work — ✍️ OPTIONAL
+# MAGIC `:authority_boost` does nothing until some node is marked as curated, and this example
+# MAGIC deliberately ships no producer for that — anything that can write the `props` key
+# MAGIC participates, which keeps the ranking independent of where curation comes from.
+# MAGIC
+# MAGIC To watch it work end to end without wiring a producer, mark one node by hand and re-run
+# MAGIC the query twice. Pick a node the query already returns but *not* the top hit, so the
+# MAGIC promotion is visible:
+# MAGIC
+# MAGIC ```sql
+# MAGIC -- mark one node as curated (any producer would write this same key)
+# MAGIC UPDATE graph.nodes
+# MAGIC    SET props = props || '{"source_method": "uc_certified"}'::jsonb
+# MAGIC  WHERE node_id = 'supplier:S3';
+# MAGIC ```
+# MAGIC
+# MAGIC Now run the retrieval twice, changing only the one bind:
+# MAGIC
+# MAGIC - `:authority_boost = 1.0` — ranking is unchanged from before, and `supplier:S3` now
+# MAGIC   reports `source_class = 'uc_certified'` so an answer can cite it.
+# MAGIC - `:authority_boost = 2.0` — `supplier:S3` moves up, because its relevance score is
+# MAGIC   multiplied while everything else keeps weight `1.0`.
+# MAGIC
+# MAGIC What to look for, because it is the point of the design: raising the boost does **not**
+# MAGIC hand rank 1 to a weakly-related certified node. Mark `category:equipment` instead (far
+# MAGIC from this question) and even a large boost leaves the on-topic nodes above it — relevance
+# MAGIC still dominates, authority only breaks near-ties. Undo with:
+# MAGIC
+# MAGIC ```sql
+# MAGIC UPDATE graph.nodes SET props = props - 'source_method' WHERE node_id = 'supplier:S3';
+# MAGIC ```
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC The retrieved context is the graph-connected neighborhood of the semantic seed —
 # MAGIC suppliers, substitutes, and region that a flat vector search would miss. Hand it to the
 # MAGIC chat endpoint to synthesize the final answer.

@@ -596,7 +596,13 @@ def main() -> int:
     ])
 
     def authority_sql(boost):
-        """The assemble stage of sql/graphrag_retrieval.sql, DuckDB dialect."""
+        """A TRANSCRIPTION of the assemble stage of sql/graphrag_retrieval.sql, DuckDB dialect.
+
+        NOT the file itself — nothing ties the two together, so any change to the real query's
+        weight, clamp, ordering or source_class handling must be mirrored here by hand. This has
+        already drifted twice: the positive-score guard and then the GREATEST clamp each landed
+        in the .sql file one step before this copy, and the suite stayed green in between.
+        """
         return acon.execute(f"""
             SELECT node_id, source_class, ROUND(rank_key, 4) AS authority_score
             FROM (
@@ -606,7 +612,7 @@ def main() -> int:
                        s.graph_score * COALESCE(
                            CASE WHEN json_extract_string(n.props, '$.source_method')
                                      = 'uc_certified' AND s.graph_score > 0
-                                THEN {boost} ELSE 1.0 END, 1.0) AS rank_key
+                                THEN GREATEST({boost}, 1.0) ELSE 1.0 END, 1.0) AS rank_key
                 FROM ascored s JOIN anodes n ON n.node_id = s.node_id
             ) r
             ORDER BY rank_key DESC, node_id
@@ -631,6 +637,65 @@ def main() -> int:
           neg_after <= neg_before, True)
     check("SQL: the negative certified node keeps its unboosted score",
           next(r[2] for r in boosted if r[0] == "cert:neg"), -0.1)
+    # ---- edge cases the remediation above claimed but no test pinned. Each of these was
+    # verified to FAIL when its guard is removed; without them the guards are decoration.
+
+    # (i) NEGATIVE score, Python half. TEST 8's fixture is all-positive by construction (the
+    # "fixture is positive" checks guarantee it), so deleting `and score > 0` from
+    # graph_retrieve.py left the whole suite green. Explicit vectors are used because
+    # bag-of-words embeddings are non-negative and can never produce a negative cosine.
+    neg_nodes = {
+        "cert:neg": {"node_type": "N", "name": "certified, anti-correlated",
+                     "props": {"source_method": "uc_certified"}},
+        "inf:neg":  {"node_type": "N", "name": "inferred, less anti-correlated", "props": {}},
+    }
+    neg_emb = {"cert:neg": [-1.0, 0.0], "inf:neg": [-0.9, -0.436]}   # cosines ~ -1.0 and ~ -0.9
+    nq = [1.0, 0.0]
+    neg_base = agent_retrieve(nq, neg_nodes, [], neg_emb, seed_k=2, max_hops=0,
+                              seed_floor=-1.0)
+    neg_boost = agent_retrieve(nq, neg_nodes, [], neg_emb, seed_k=2, max_hops=0,
+                               seed_floor=-1.0, authority_boost=2.0)
+    check("py: negative-score fixture really is negative",
+          all(r["score"] < 0 for r in neg_base), True)
+    check("py: boosting never demotes a negative-score certified node",
+          [r["node_id"] for r in neg_boost], [r["node_id"] for r in neg_base])
+    check("py: the negative certified node keeps its unboosted score",
+          next(r["score"] for r in neg_boost if r["node_id"] == "cert:neg"),
+          next(r["score"] for r in neg_base if r["node_id"] == "cert:neg"))
+
+    # (ii) ORDERING must use the UNROUNDED key. Every other fixture score is exact at <= 4 dp,
+    # so ordering on the rounded column is indistinguishable from ordering on the raw product
+    # and a regression to the rounded column passes silently. These two differ at the 5th dp
+    # and round to the SAME 4 dp value, so only unrounded ordering keeps them apart.
+    tie_nodes = {"a:hi": {"node_type": "N", "name": "a", "props": {}},
+                 "b:lo": {"node_type": "N", "name": "b", "props": {}}}
+    tie_emb = {"a:hi": [1.0, 0.0], "b:lo": [0.99999, 0.00447]}
+    tied = agent_retrieve([1.0, 0.0], tie_nodes, [], tie_emb, seed_k=2, max_hops=0,
+                          seed_floor=-1.0)
+    check("py: the tie fixture rounds to one value at 4 dp",
+          len({r["score"] for r in tied}), 1)
+    check("py: but the raw scores differ, so ordering is by the unrounded key",
+          [r["node_id"] for r in tied], ["a:hi", "b:lo"])
+
+    # (iii) a None boost must coalesce to 1.0 like the SQL, not raise.
+    none_boost = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
+                                authority_boost=None)
+    check("py: authority_boost=None behaves as 1.0 (matches SQL COALESCE)",
+          [r["node_id"] for r in none_boost], baseline_ids)
+
+    # (iv) a boost BELOW 1.0 must not demote either — the clamp, not just the sign guard.
+    for bad in (0.5, 0.0, -2.0):
+        clamped = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
+                                 authority_boost=bad)
+        check(f"py: boost={bad} is clamped, certified node not demoted",
+              [r["node_id"] for r in clamped], baseline_ids)
+    lo = authority_sql(0.5)
+    check("SQL: boost=0.5 is clamped, ordering unchanged",
+          [r[0] for r in lo], [r[0] for r in base_sql])
+    neg_sql = authority_sql(-2.0)
+    check("SQL: boost=-2.0 is clamped, ordering unchanged",
+          [r[0] for r in neg_sql], [r[0] for r in base_sql])
+
     acon.close()
 
     print("\n" + "=" * 60)

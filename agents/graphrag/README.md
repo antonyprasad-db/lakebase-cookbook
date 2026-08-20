@@ -103,11 +103,9 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   parameter arity, so an existing caller that does not pass it raises
   `bind message supplies 4 parameters, but prepared statement requires 5` — the ranking is
   backward-compatible, the *bind signature* is not. Bind `1.0` to keep the previous behaviour
-  exactly. The parameter is referenced once, in the inner `SELECT`, and ordering uses that computed
-  column — tidier than repeating it in the score, the `ORDER BY` and the output, though note
-  `:query_embedding` is already referenced three times, so single-reference is hygiene here rather
-  than a property the file as a whole has. The Python twin defaults it to `1.0`, so Python callers
-  need no change. Calibrate it once a certified core actually
+  exactly. The Python twin defaults it to `1.0`, so Python callers need no change. Values below
+  `1.0` are clamped up to `1.0` in both halves, because a fractional or negative multiplier would
+  demote the certified node the boost exists to promote. Calibrate it once a certified core actually
   exists — start around `1.2`-`2.0` and check against your own graph, since the useful value depends
   on the score gaps your embedding model produces, not on a portable constant.
 - **Keep a minimum Lakebase compute above zero for latency-sensitive serving.** After scale-to-zero,
@@ -159,8 +157,11 @@ certified node outrank a highly relevant inferred one — worse than having no a
 Multiplying keeps relevance meaningful and makes the strength one tunable knob. The smoke test pins
 both directions: a sufficient boost *does* promote a certified node to rank 1, and a modest boost
 *does not* let the least relevant certified node reach rank 1. A sort-key implementation passes the
-first and fails the second. Both the Python twin and the SQL assemble stage are covered — the SQL
-against its own fixture, because the traversal mirror in TEST 2 stops before the assemble stage.
+first and fails the second. Both halves are covered, including the negative-score and
+below-1.0-boost guards. Note the SQL side is exercised as a **hand transcription** of the assemble
+stage against its own fixture, not by running `sql/graphrag_retrieval.sql` itself — nothing ties the
+two together, so a change to the query must be mirrored in the test by hand. Only a live Lakebase run
+exercises the real file.
 
 **`:authority_boost` defaults to 1.0, which leaves every weight at 1.0**, so the ordering matches the
 pre-authority behaviour whether or not certified rows exist. Two caveats, because "no-op" is easy to
@@ -183,10 +184,13 @@ the knob. Boosting only above zero keeps the transform monotone. The smoke test 
 halves.
 
 **`source_class` is passed through verbatim, not normalised to two values.** It is whatever
-`props ->> 'source_method'` holds, defaulting to `inferred` only when the key is absent. That matters
-because [`sql/gold_triplets_mapping.sql`](sql/gold_triplets_mapping.sql) already emits `structured`
-and `llm_enrichment`, and those keep their own labels. Only `uc_certified` is boosted; every other
-value, known or not, carries weight `1.0`. **Branch on `== 'uc_certified'`, never on `!= 'inferred'`.**
+`n.props ->> 'source_method'` holds, defaulting to `inferred` only when the key is absent, so any
+producer's own label survives. In practice today you will see only `uc_certified` or `inferred`,
+because nothing in this repo writes `source_method` into **node** props yet — the `structured` and
+`llm_enrichment` values in [`sql/gold_triplets_mapping.sql`](sql/gold_triplets_mapping.sql) are
+**edge** provenance (`e.props`), a different table. The pass-through is future-proofing rather than a
+current collision. Only `uc_certified` is boosted; every other value carries weight `1.0`.
+**Branch on `== 'uc_certified'`, never on `!= 'inferred'`.**
 
 **Where certified nodes come from is deliberately not this example's business.** Anything that can
 write the `props` key participates — a Unity Catalog semantics exporter, a curation UI, a hand-written

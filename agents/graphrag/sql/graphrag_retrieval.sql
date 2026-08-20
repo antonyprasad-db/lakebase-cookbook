@@ -17,10 +17,22 @@
 --                                      REQUIRED BIND: Postgres has no server-side default for a
 --                                      named parameter, so you must pass this even to keep the
 --                                      old behavior — bind -1.0 for "no floor". Omitting it
---                                      raises "bind message supplies 2 parameters, but prepared
---                                      statement requires 3".
+--                                      raises a "bind message supplies N parameters, but prepared
+--                                      statement requires N+1" error. With :authority_boost added
+--                                      there are now FIVE binds, so omitting one reports 4 vs 5.
 --                                      Calibrate it to your embedding model's observed range,
 --                                      not to a fixed constant (see README).
+--   :authority_boost  NUMERIC       -- multiplier for a node whose props carry
+--                                      source_method='uc_certified', so a curated definition wins
+--                                      the tie against an equally-relevant inferred one. Bind 1.0
+--                                      to rank exactly as before. REQUIRED BIND, same reason as
+--                                      :seed_floor. Bind it as NUMERIC, not text: the CASE's
+--                                      ELSE 1.0 fixes the branch type, so a text bind fails at
+--                                      plan time with "CASE types text and numeric cannot be
+--                                      matched". Values below 1.0 are clamped up to 1.0 (see the
+--                                      assemble stage) because a fractional or negative
+--                                      multiplier would DEMOTE the certified node it is meant to
+--                                      promote.
 --
 -- Empty-seed caveat: if the floor exceeds every node's similarity, the seed CTE is
 -- empty and this statement returns ZERO rows. Have the caller detect that and either
@@ -124,13 +136,14 @@ scored AS (
 --    column would collapse scores that differ beyond 4 dp into ties (0.175024 and 0.175006
 --    both round to 0.1750) and let the tiebreak reorder them, which is not a no-op.
 --
---    COALESCE guards ONE input only: `:authority_boost` bound to NULL. The CASE itself cannot
---    return NULL — it has an explicit ELSE, and a row whose props lack `source_method` makes
---    the WHEN condition UNKNOWN, not true, so it falls to ELSE and yields 1.0. (`props` is
---    NOT NULL DEFAULT '{}' in schema.sql, so a NULL props is unreachable too.) Without the
---    COALESCE a NULL bind would make every score NULL, and Postgres sorts NULLs FIRST under
---    ORDER BY ... DESC — rank 1 for a garbage row. It therefore trades a loud failure for a
---    silent fallback to 1.0; that is the intended trade, but it does mask a caller bug.
+--    COALESCE guards ONE input: `:authority_boost` bound to NULL, which returns NULL through the
+--    THEN branch. The CASE introduces no NULL of its own — it has an explicit ELSE, and a row
+--    whose props lack `source_method` makes the WHEN condition UNKNOWN, not true, so it falls to
+--    ELSE and yields 1.0. (`props` is NOT NULL DEFAULT '{}' in schema.sql, so NULL props is
+--    unreachable too.) Without the COALESCE a NULL bind would make every score NULL, and
+--    Postgres sorts NULLs FIRST under ORDER BY ... DESC — rank 1 for a garbage row. It therefore
+--    trades a loud failure for a silent fallback to 1.0; that is the intended trade, but it does
+--    mask a caller bug.
 SELECT
     node_id, node_type, name, props, nearest_hop, rels, score, source_class,
     -- Rounded for display only. The ORDER BY below deliberately uses the UNROUNDED key.
@@ -144,15 +157,24 @@ FROM (
         s.nearest_hop,
         s.rels,
         ROUND(s.graph_score::numeric, 4)                    AS score,
-        -- Passed through verbatim, NOT normalised to a two-value domain: gold_triplets
-        -- already emits 'structured' and 'llm_enrichment' (see sql/gold_triplets_mapping.sql),
-        -- and those must keep their own label. Only 'uc_certified' is boosted; every other
-        -- value, known or not, carries weight 1.0. Branch on == 'uc_certified', never on
-        -- != 'inferred'.
+        -- Passed through verbatim, NOT normalised to a two-value domain, so that any producer's
+        -- own label survives. Today nothing in this repo writes source_method into NODE props,
+        -- so in practice you will see only 'uc_certified' or 'inferred' — the 'structured' /
+        -- 'llm_enrichment' values in sql/gold_triplets_mapping.sql are EDGE provenance
+        -- (e.props), a different table, and are not a live source of node values. The
+        -- pass-through is future-proofing, not a current collision. Only 'uc_certified' is
+        -- boosted; every other value, known or not, carries weight 1.0. Branch on
+        -- == 'uc_certified', never on != 'inferred'.
         COALESCE(n.props ->> 'source_method', 'inferred')   AS source_class,
+        -- GREATEST(..., 1.0) is the second half of the monotonicity guarantee. The
+        -- graph_score > 0 test stops a NEGATIVE score from being made worse; this stops a
+        -- boost BELOW 1.0 from doing the same thing on a positive score. Measured without it:
+        -- certified 1.00 vs inferred 0.90 at boost 0.5 ranks the inferred node first, and at
+        -- -2.0 the certified node lands at -2.00. Clamping means a boost can never rank a
+        -- certified node below where it would have sat unboosted, whatever is bound.
         s.graph_score * COALESCE(
             CASE WHEN n.props ->> 'source_method' = 'uc_certified' AND s.graph_score > 0
-                 THEN :authority_boost ELSE 1.0 END, 1.0)   AS authority_rank_key
+                 THEN GREATEST(:authority_boost, 1.0) ELSE 1.0 END, 1.0) AS authority_rank_key
     FROM scored s
     JOIN graph.nodes n ON n.node_id = s.node_id
 ) ranked
