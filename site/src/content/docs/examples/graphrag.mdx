@@ -121,6 +121,34 @@ This is the GraphRAG win: a supplier or substitute that shares no keywords with
 the question still surfaces because it's one hop from a semantically-matched node
 — something flat vector RAG never retrieves.
 
+## The certified core (Unity Catalog metric views)
+
+The authority stage needs some node to *be* certified. `graph_certified.py` produces those from
+Unity Catalog **metric views**: each view becomes a node, each field becomes a node, and a
+directional `HAS_MEASURE` / `HAS_DIMENSION` edge joins them — every row tagged
+`source_method='uc_certified'`.
+
+Fields are separate nodes, not properties on the view, because retrieval seeds on node embeddings
+and expands along edges. A question about "revenue" has to match the *measure* and then reach its
+view; a measure inside a JSON blob is unreachable, and authority ranking only ever re-orders nodes
+retrieval already found.
+
+Two things worth knowing if you adapt this:
+
+- **The read path needs two queries.** `information_schema.columns` gives names, types and
+  comments but **cannot distinguish a measure from a dimension** — both `data_type` and
+  `full_data_type` report a measure as plain `bigint`. Only `DESCRIBE EXTENDED` marks it, with a
+  ` measure` type suffix. That, plus `display_name`, `synonyms`, `Owner` and `Created Time`, is why
+  DESCRIBE is not optional.
+- **`information_schema.semantic_*` is Snowflake's, not Unity Catalog's.** `semantic_views`,
+  `semantic_dimensions` and friends look like the structured source you want. In one workspace
+  survey every catalog exposing them was a Snowflake federation connection, and the native catalog
+  holding a real Databricks metric view exposed none. Reading them finds nothing in Unity Catalog.
+
+Only metric views are required, so the prerequisite stays "you have a metric view". Domains,
+governed Pages and certification signals are the other three parts of Unity Catalog business
+semantics and are left as future enrichment.
+
 ## Building the graph from documents
 
 The example above starts from structured dims. When the source is documents,

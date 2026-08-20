@@ -182,6 +182,57 @@ print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 5. Certified core from Unity Catalog metric views — ✍️ OPTIONAL
+# MAGIC Step 4b marked a node certified by hand. This does it from real curated semantics:
+# MAGIC `graph_certified.py` reads this workspace's Unity Catalog metric views and emits nodes
+# MAGIC and edges already tagged `source_method='uc_certified'`, so the authority stage picks
+# MAGIC them up with no further wiring.
+# MAGIC
+# MAGIC Requires at least one metric view you can read. Scope it to one catalog — unscoped
+# MAGIC discovery reads every catalog you can see, which on a large workspace is thousands of rows.
+
+# COMMAND ----------
+
+# `SqlReader` is a Protocol, so anything that returns rows satisfies it. spark.sql is the
+# obvious choice inside a notebook; the module itself has no Spark dependency, which is what
+# keeps it unit-testable with no warehouse.
+class SparkReader:
+    def rows(self, sql):
+        return [list(r) for r in spark.sql(sql).collect()]  # noqa: F821
+
+
+# ✍️ set this to a catalog that actually contains a metric view
+CERTIFIED_CATALOG = None  # e.g. "my_catalog"
+
+if CERTIFIED_CATALOG:
+    from graph_certified import certified_rows, discover_metric_views, read_metric_view
+
+    reader = SparkReader()
+    views = discover_metric_views(reader, catalog=CERTIFIED_CATALOG)
+    print(f"found {len(views)} user metric view(s) in {CERTIFIED_CATALOG}")
+
+    nodes, edges = [], []
+    for cat, sch, name in views:
+        view = read_metric_view(reader, cat, sch, name)
+        rows = certified_rows(view)
+        nodes.extend(rows.nodes)
+        edges.extend(rows.edges)
+        measures = sum(1 for f in view.fields if f.is_measure)
+        print(f"  {view.fqn}: {measures} measure(s), "
+              f"{len(view.fields) - measures} dimension(s), owner={view.owner or 'unknown'}")
+
+    print(f"\n{len(nodes)} certified node(s) and {len(edges)} edge(s) ready to load.")
+    print("Load them the same way step 3 loads the business graph, then embed each node with "
+          "graph_certified.embedding_text(node) — NOT its bare name. A question says "
+          "'how much did we make', not 'total_revenue', so the display name, description and "
+          "the curator's synonyms are what make the certified core reachable at all. Authority "
+          "ranking only re-orders nodes retrieval already found.")
+else:
+    print("CERTIFIED_CATALOG is unset — skipping. Set it to a catalog containing a metric view.")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC The retrieved context is the graph-connected neighborhood of the semantic seed —
 # MAGIC suppliers, substitutes, and region that a flat vector search would miss. Hand it to the
 # MAGIC chat endpoint to synthesize the final answer.

@@ -212,6 +212,70 @@ write the `props` key participates — a Unity Catalog semantics exporter, a cur
 insert. That keeps the ranking seam independent of any one producer's availability, and it is why this
 half carries no new prerequisite beyond what the example already needs.
 
+## Certified core: Unity Catalog metric views as authoritative nodes
+
+The authority stage above boosts a node whose props carry `source_method: "uc_certified"`.
+[`graph_certified.py`](graph_certified.py) is what produces those nodes, from Unity Catalog
+**metric views** — the objects the docs call the core implementation of Unity Catalog semantics.
+
+Each metric view becomes a node, each field becomes a node, and a directional edge joins them:
+
+```
+metricview:cat.sch.order_details  --HAS_MEASURE-->    measure:cat.sch.order_details.total_revenue
+                                  --HAS_DIMENSION-->  dimension:cat.sch.order_details.ship_date
+```
+
+Fields are nodes rather than props on the view for a concrete reason: retrieval seeds on node
+embeddings and expands along edges, so a question about "revenue" must be able to match the
+*measure* and then reach its view. A measure buried in a JSON blob is unreachable, and authority
+ranking only ever re-orders nodes retrieval already found. That is also why `embedding_text()`
+embeds the display name, the description and the curator's synonyms rather than the column name —
+nobody asks a question using `total_revenue`.
+
+### The read path takes two queries
+
+| Source | Gives | Missing |
+| --- | --- | --- |
+| `information_schema.tables` (`table_type = 'METRIC_VIEW'`) | discovery | — |
+| `information_schema.columns` | names, types, comments | **cannot tell a measure from a dimension** |
+| `DESCRIBE EXTENDED <view>` | the measure flag, `display_name`, `synonyms`, `Owner`, `Created Time` | — |
+
+Both `data_type` and `full_data_type` report a measure as plain `bigint`; only DESCRIBE marks it,
+by suffixing the type with ` measure`. Since measure-versus-dimension *is* the semantic layer,
+DESCRIBE is not optional. It is this module's one brittle coupling, so it is isolated in
+`parse_describe()` and pinned against verbatim live output.
+
+`Owner` and `Created Time` are carried onto the view node. Retrieval does not consult them today,
+but they are the raw material for a richer authority function than "certified or not".
+
+### `information_schema.semantic_*` is Snowflake's, not Unity Catalog's
+
+`semantic_views`, `semantic_dimensions`, `semantic_metrics` and `semantic_relationships` look like
+exactly the structured source this should read. **They are not.** In one workspace survey, all 12
+catalogs exposing them were Snowflake connections surfaced through Lakehouse Federation, and the
+native catalog holding an actual Databricks metric view exposed none of them. Reading them yields a
+builder that works only against federated Snowflake and silently finds nothing in Unity Catalog.
+
+### Scope, and why only metric views are required
+
+Unity Catalog business semantics has four parts: metric views, **domains**, governed **Pages**, and
+**certification/deprecation** signals. Only metric views are required here, so the prerequisite
+stays "you have a metric view" and the example runs for a reader without an allow-list. The other
+three are deliberate future enrichment.
+
+Genie and Lakeview materialise their own metric views under
+`__databricks_internal_catalog_lakeview_*`; discovery filters them, because in one sample they
+outnumbered user objects on the first page of results.
+
+### Running it
+
+The builder is pure Python behind a `SqlReader` protocol, so it does not care how you reach Unity
+Catalog — `spark.sql`, the SQL connector, or the Statement Execution API all satisfy it. Notebook
+step 5 wires it to the same workspace's Unity Catalog and writes the result into the graph.
+
+**It writes nothing on its own.** `certified_rows()` returns nodes and edges; loading them uses the
+same path `graph_build.py` already does, which is what keeps this module testable with no database.
+
 ## Layout
 
 ```
