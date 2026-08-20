@@ -105,7 +105,13 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
     # below stops a NEGATIVE score being made worse; this stops a boost BELOW 1.0 doing the
     # same thing to a positive one. Together they guarantee a boost can never rank a certified
     # node lower than it would have sat unboosted, whatever the caller passes.
-    boost = 1.0 if authority_boost is None else max(authority_boost, 1.0)
+    # NaN needs its own arm: max(nan, 1.0) is nan, so it slips past the clamp, and the two
+    # halves then disagree in OPPOSITE directions — Python sorts nan low (demoting the node)
+    # while Postgres numeric NaN sorts greater than everything (promoting it to rank 1). NaN is
+    # reachable whenever a caller derives the boost from a score ratio. `x != x` is the portable
+    # NaN test.
+    boost = (1.0 if authority_boost is None or authority_boost != authority_boost
+             else max(authority_boost, 1.0))
     out = []
     for nid, score in best.items():
         if nid not in nodes:

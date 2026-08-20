@@ -125,11 +125,12 @@ print("Complete the cell above to apply sql/schema.sql and INSERT the graph.")
 # MAGIC Once the graph is loaded (step 3), run `sql/graphrag_retrieval.sql` against the same
 # MAGIC Lakebase connection: pgvector cosine seed -> recursive-CTE k-hop expansion. Bind
 # MAGIC `:query_embedding` (embed the user question), `:seed_k`, `:max_hops`, `:seed_floor`,
-# MAGIC `:authority_boost` (1.0 keeps the pre-authority ranking; all five binds are required)
-# MAGIC (min cosine a seed must clear; `-1.0` = keep all, same as before — raise toward
+# MAGIC (`:seed_floor` is the min cosine a seed must clear; `-1.0` = keep all, same as before —
+# MAGIC raise toward
 # MAGIC a floor calibrated to your model's similarity range — ~`0.55` for
-# MAGIC `databricks-gte-large-en` on this graph). To validate the logic *without* Lakebase,
-# MAGIC run `smoketest/graphrag_logic_smoketest.py`.
+# MAGIC `databricks-gte-large-en` on this graph). `:authority_boost` of `1.0` keeps the
+# MAGIC pre-authority ranking; all five binds are required. To validate the logic
+# MAGIC *without* Lakebase, run `smoketest/graphrag_logic_smoketest.py`.
 
 # COMMAND ----------
 
@@ -166,10 +167,13 @@ print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
 # MAGIC - `:authority_boost = 2.0` — `supplier:S3` moves up, because its relevance score is
 # MAGIC   multiplied while everything else keeps weight `1.0`.
 # MAGIC
-# MAGIC What to look for, because it is the point of the design: raising the boost does **not**
-# MAGIC hand rank 1 to a weakly-related certified node. Mark `category:equipment` instead (far
-# MAGIC from this question) and even a large boost leaves the on-topic nodes above it — relevance
-# MAGIC still dominates, authority only breaks near-ties. Undo with:
+# MAGIC What to look for, because it is the point of the design: a **modest** boost does not hand
+# MAGIC rank 1 to a weakly-related certified node. Mark `category:dairy` instead — it is in this
+# MAGIC graph but further from the question — and at `1.2` the on-topic nodes stay above it, because
+# MAGIC relevance still dominates and authority only breaks near-ties. Be precise about the limit
+# MAGIC though: the boost is an unbounded multiplier with only a lower clamp, so a *large* enough
+# MAGIC value will promote any positively-scored certified node to rank 1. That is a calibration
+# MAGIC choice, not a guarantee the query makes. Undo with:
 # MAGIC
 # MAGIC ```sql
 # MAGIC UPDATE graph.nodes SET props = props - 'source_method' WHERE node_id = 'supplier:S3';

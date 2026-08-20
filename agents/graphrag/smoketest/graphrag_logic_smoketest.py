@@ -527,11 +527,13 @@ def main() -> int:
     baseline = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2)
     baseline_ids = [r["node_id"] for r in baseline]
 
-    # every node here is unmarked, so every row must read as inferred and its authority
-    # score must equal its raw score — the no-source_method path that would go NULL in SQL.
+    # every node here is unmarked, so every row must read as inferred. NOTE the authority_score
+    # == score check below is structurally guaranteed once weight is 1.0, so it documents the
+    # shape rather than pinning behaviour — the guards are pinned by the mutation-checked cases
+    # further down.
     check("unmarked nodes report source_class=inferred",
           {r["source_class"] for r in baseline}, {"inferred"})
-    check("unmarked nodes: authority_score == score (no NULL/None leak)",
+    check("unmarked nodes: authority_score == score (shape, not a guard)",
           all(r["authority_score"] == r["score"] for r in baseline), True)
 
     # certify the runner-up, then prove the default is an exact no-op even with a certified
@@ -586,13 +588,14 @@ def main() -> int:
         ("inf:hi",    '{"source_method":"inferred"}'),        # inferred, strongest
         ("other:mid", '{"source_method":"structured"}'),      # a real gold_triplets value
         ("bare:mid",  '{}'),                                  # no source_method at all
+        ("empty:mid",  '{"source_method":""}'),               # present but falsy -> must stay ""
         ("cert:neg",  '{"source_method":"uc_certified"}'),    # certified, NEGATIVE score
         ("inf:neg",   '{"source_method":"inferred"}'),        # inferred, less negative
     ])
     acon.execute("CREATE TABLE ascored(node_id TEXT, graph_score DOUBLE)")
     acon.executemany("INSERT INTO ascored VALUES (?,?)", [
         ("cert:hi", 0.50), ("inf:hi", 0.60), ("other:mid", 0.30),
-        ("bare:mid", 0.30), ("cert:neg", -0.10), ("inf:neg", -0.15),
+        ("bare:mid", 0.30), ("empty:mid", 0.20), ("cert:neg", -0.10), ("inf:neg", -0.15),
     ])
 
     def authority_sql(boost):
@@ -609,10 +612,10 @@ def main() -> int:
                 SELECT n.node_id,
                        COALESCE(json_extract_string(n.props, '$.source_method'), 'inferred')
                            AS source_class,
-                       s.graph_score * COALESCE(
+                       s.graph_score *
                            CASE WHEN json_extract_string(n.props, '$.source_method')
                                      = 'uc_certified' AND s.graph_score > 0
-                                THEN GREATEST({boost}, 1.0) ELSE 1.0 END, 1.0) AS rank_key
+                                THEN GREATEST({boost}, 1.0) ELSE 1.0 END AS rank_key
                 FROM ascored s JOIN anodes n ON n.node_id = s.node_id
             ) r
             ORDER BY rank_key DESC, node_id
@@ -621,11 +624,15 @@ def main() -> int:
     base_sql = authority_sql(1.0)
     check("SQL: boost=1.0 orders by raw score (no-op)",
           [r[0] for r in base_sql],
-          ["inf:hi", "cert:hi", "bare:mid", "other:mid", "cert:neg", "inf:neg"])
+          ["inf:hi", "cert:hi", "bare:mid", "other:mid", "empty:mid", "cert:neg", "inf:neg"])
     check("SQL: a node with no source_method reads as inferred, weight 1.0",
           next((r[1], r[2]) for r in base_sql if r[0] == "bare:mid"), ("inferred", 0.3))
     check("SQL: a foreign source_method passes through verbatim, not normalised",
           next(r[1] for r in base_sql if r[0] == "other:mid"), "structured")
+    # COALESCE catches NULL only, so a present-but-empty value must survive as "" in BOTH halves.
+    # Python's truthiness fallback would turn it into "inferred" and diverge.
+    check("SQL: a present-but-empty source_method stays empty, not 'inferred'",
+          next(r[1] for r in base_sql if r[0] == "empty:mid"), "")
 
     boosted = authority_sql(2.0)
     check("SQL: boost promotes the certified node past the stronger inferred one",
@@ -649,7 +656,9 @@ def main() -> int:
                      "props": {"source_method": "uc_certified"}},
         "inf:neg":  {"node_type": "N", "name": "inferred, less anti-correlated", "props": {}},
     }
-    neg_emb = {"cert:neg": [-1.0, 0.0], "inf:neg": [-0.9, -0.436]}   # cosines ~ -1.0 and ~ -0.9
+    # cert ABOVE inf, mirroring the SQL fixture (certified -0.10 over inferred -0.15). Inverted,
+    # the certified node is already last and NO boost can demote it, so the test cannot fail.
+    neg_emb = {"cert:neg": [-0.9, -0.436], "inf:neg": [-1.0, 0.0]}   # cosines ~ -0.9 and ~ -1.0
     nq = [1.0, 0.0]
     neg_base = agent_retrieve(nq, neg_nodes, [], neg_emb, seed_k=2, max_hops=0,
                               seed_floor=-1.0)
@@ -657,31 +666,53 @@ def main() -> int:
                                seed_floor=-1.0, authority_boost=2.0)
     check("py: negative-score fixture really is negative",
           all(r["score"] < 0 for r in neg_base), True)
+    check("py: the certified node starts ABOVE the inferred one (else nothing can demote it)",
+          [r["node_id"] for r in neg_base], ["cert:neg", "inf:neg"])
     check("py: boosting never demotes a negative-score certified node",
-          [r["node_id"] for r in neg_boost], [r["node_id"] for r in neg_base])
-    check("py: the negative certified node keeps its unboosted score",
-          next(r["score"] for r in neg_boost if r["node_id"] == "cert:neg"),
-          next(r["score"] for r in neg_base if r["node_id"] == "cert:neg"))
+          [r["node_id"] for r in neg_boost], ["cert:neg", "inf:neg"])
+    # assert on authority_score, NOT score: `score` is the unboosted value and is identical
+    # under any boost, so asserting on it cannot detect a missing guard.
+    check("py: the negative certified node's AUTHORITY score is left unboosted",
+          next(r["authority_score"] for r in neg_boost if r["node_id"] == "cert:neg"),
+          next(r["authority_score"] for r in neg_base if r["node_id"] == "cert:neg"))
 
     # (ii) ORDERING must use the UNROUNDED key. Every other fixture score is exact at <= 4 dp,
     # so ordering on the rounded column is indistinguishable from ordering on the raw product
     # and a regression to the rounded column passes silently. These two differ at the 5th dp
     # and round to the SAME 4 dp value, so only unrounded ordering keeps them apart.
-    tie_nodes = {"a:hi": {"node_type": "N", "name": "a", "props": {}},
-                 "b:lo": {"node_type": "N", "name": "b", "props": {}}}
-    tie_emb = {"a:hi": [1.0, 0.0], "b:lo": [0.99999, 0.00447]}
+    # The higher raw score MUST sit on the lexicographically LARGER id. With it on the smaller
+    # id, rounded ordering ties the pair and the node_id tiebreak reproduces the correct order
+    # by accident, so a regression to rounded ordering passes.
+    tie_nodes = {"z:hi": {"node_type": "N", "name": "z", "props": {}},
+                 "a:lo": {"node_type": "N", "name": "a", "props": {}}}
+    tie_emb = {"z:hi": [1.0, 0.0], "a:lo": [0.99999, 0.00447]}
     tied = agent_retrieve([1.0, 0.0], tie_nodes, [], tie_emb, seed_k=2, max_hops=0,
                           seed_floor=-1.0)
     check("py: the tie fixture rounds to one value at 4 dp",
           len({r["score"] for r in tied}), 1)
     check("py: but the raw scores differ, so ordering is by the unrounded key",
-          [r["node_id"] for r in tied], ["a:hi", "b:lo"])
+          [r["node_id"] for r in tied], ["z:hi", "a:lo"])
 
     # (iii) a None boost must coalesce to 1.0 like the SQL, not raise.
     none_boost = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
                                 authority_boost=None)
     check("py: authority_boost=None behaves as 1.0 (matches SQL COALESCE)",
           [r["node_id"] for r in none_boost], baseline_ids)
+
+    # the same present-but-falsy case on the Python side, pinning `is None` over truthiness
+    empty_nodes = {"e:1": {"node_type": "N", "name": "e", "props": {"source_method": ""}}}
+    empty_out = agent_retrieve([1.0, 0.0], empty_nodes, [], {"e:1": [1.0, 0.0]}, seed_k=1,
+                               max_hops=0, seed_floor=-1.0)
+    check("py: a present-but-empty source_method stays empty, not 'inferred'",
+          empty_out[0]["source_class"], "")
+
+    # (iii-b) NaN must be treated as absent, not slipped past the clamp.
+    nan_boost = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
+                               authority_boost=float("nan"))
+    check("py: authority_boost=NaN behaves as 1.0, not as a demotion",
+          [r["node_id"] for r in nan_boost], baseline_ids)
+    check("py: NaN never reaches authority_score (would not be valid JSON)",
+          all(r["authority_score"] == r["authority_score"] for r in nan_boost), True)
 
     # (iv) a boost BELOW 1.0 must not demote either — the clamp, not just the sign guard.
     for bad in (0.5, 0.0, -2.0):

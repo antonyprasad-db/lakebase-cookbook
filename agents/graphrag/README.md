@@ -92,8 +92,10 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   arrives via graph expansion). Cosine ranges
   `[-1, 1]`, so `-1.0` keeps all seeds (identical to no floor). **`:seed_floor` is a required
   bind** — Postgres has no server-side default for a named parameter, so existing callers of the
-  SQL must pass it even to keep the old behavior (bind `-1.0`); omitting it raises
-  `bind message supplies 2 parameters, but prepared statement requires 3`. The Python twin
+  SQL must pass it even to keep the old behavior (bind `-1.0`); omitting a required bind raises a
+  `bind message supplies N parameters, but prepared statement requires N+1` error. The exact
+  numbers depend on the driver, since `:query_embedding` appears three times and drivers differ
+  on whether repeated names collapse to one bind. The Python twin
   defaults it to `-1.0`, so Python callers need no change. **Watch the empty-seed case:** a floor
   above every node's similarity empties the seed CTE and the query returns *zero* rows — detect
   that in your caller and either retry at `-1.0` or decline to answer, rather than synthesizing
@@ -150,7 +152,8 @@ A node marked as certified carries it in `props`, the same place edges already c
 
 Retrieval then multiplies that node's score by `:authority_boost` and returns two extra columns:
 `source_class` (`uc_certified` / `inferred`) so an answer can cite what resolved it, and
-`authority_score`, which is what the ranking actually orders by.
+`authority_score`, the rounded weighted value. Note the ordering uses the UNROUNDED
+weighted score, not this column — see the caveats below before re-sorting client-side on it.
 
 **A multiplier, not a sort key.** Ordering by `(authority, score)` would let a barely-relevant
 certified node outrank a highly relevant inferred one — worse than having no authority signal at all.
@@ -235,7 +238,9 @@ cd agents/graphrag
 uv run --python 3.11 --with duckdb --with numpy smoketest/graphrag_logic_smoketest.py
 ```
 
-82 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
+113 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
+authority ranking (certified-over-inferred, the positive-score and below-1.0 clamps, NaN and
+None boosts, unrounded ordering, verbatim `source_class`),
 dangling-edge guard, blended-score ranking, depth bound, and the `seed_floor` distractor guard.
 
 ## Deploy (Asset Bundle)

@@ -27,8 +27,8 @@
 --                                      the tie against an equally-relevant inferred one. Bind 1.0
 --                                      to rank exactly as before. REQUIRED BIND, same reason as
 --                                      :seed_floor. Bind it as NUMERIC, not text: the CASE's
---                                      ELSE 1.0 fixes the branch type, so a text bind fails at
---                                      plan time with "CASE types text and numeric cannot be
+--                                      GREATEST resolves the type first, so a text bind fails at
+--                                      plan time with "GREATEST types text and numeric cannot be
 --                                      matched". Values below 1.0 are clamped up to 1.0 (see the
 --                                      assemble stage) because a fractional or negative
 --                                      multiplier would DEMOTE the certified node it is meant to
@@ -136,14 +136,11 @@ scored AS (
 --    column would collapse scores that differ beyond 4 dp into ties (0.175024 and 0.175006
 --    both round to 0.1750) and let the tiebreak reorder them, which is not a no-op.
 --
---    COALESCE guards ONE input: `:authority_boost` bound to NULL, which returns NULL through the
---    THEN branch. The CASE introduces no NULL of its own — it has an explicit ELSE, and a row
---    whose props lack `source_method` makes the WHEN condition UNKNOWN, not true, so it falls to
---    ELSE and yields 1.0. (`props` is NOT NULL DEFAULT '{}' in schema.sql, so NULL props is
---    unreachable too.) Without the COALESCE a NULL bind would make every score NULL, and
---    Postgres sorts NULLs FIRST under ORDER BY ... DESC — rank 1 for a garbage row. It therefore
---    trades a loud failure for a silent fallback to 1.0; that is the intended trade, but it does
---    mask a caller bug.
+--    A NULL bind needs no COALESCE: Postgres GREATEST ignores NULL inputs and returns NULL only
+--    if EVERY argument is NULL, so GREATEST(NULL, 1.0) is 1.0. That means a NULL
+--    :authority_boost already degrades to "no boost" rather than making the score NULL (which
+--    would sort FIRST under ORDER BY ... DESC and hand rank 1 to a garbage row). An earlier
+--    revision wrapped this in COALESCE for that reason; the clamp made it dead code.
 SELECT
     node_id, node_type, name, props, nearest_hop, rels, score, source_class,
     -- Rounded for display only. The ORDER BY below deliberately uses the UNROUNDED key.
@@ -172,9 +169,9 @@ FROM (
         -- certified 1.00 vs inferred 0.90 at boost 0.5 ranks the inferred node first, and at
         -- -2.0 the certified node lands at -2.00. Clamping means a boost can never rank a
         -- certified node below where it would have sat unboosted, whatever is bound.
-        s.graph_score * COALESCE(
+        s.graph_score *
             CASE WHEN n.props ->> 'source_method' = 'uc_certified' AND s.graph_score > 0
-                 THEN GREATEST(:authority_boost, 1.0) ELSE 1.0 END, 1.0) AS authority_rank_key
+                 THEN GREATEST(:authority_boost, 1.0) ELSE 1.0 END   AS authority_rank_key
     FROM scored s
     JOIN graph.nodes n ON n.node_id = s.node_id
 ) ranked
