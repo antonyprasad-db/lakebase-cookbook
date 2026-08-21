@@ -97,7 +97,7 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
     #        [-1, 1], and seed_floor's -1.0 default admits negatives; multiplying a negative
     #        score makes it more negative, demoting the certified node the boost exists to
     #        promote (-0.10 * 2.0 = -0.20, below an inferred -0.15).
-    #      * a None boost coalesces to 1.0, matching the SQL's COALESCE, rather than raising.
+    #      * a None boost becomes 1.0, matching the SQL where GREATEST ignores NULL.
     #      * the sort uses the UNROUNDED key; ordering by the rounded output would collapse
     #        scores differing beyond 4 dp into ties (0.175024 / 0.175006 -> 0.1750) and let
     #        the tiebreak reorder them, which is not a no-op.
@@ -110,8 +110,16 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
     # while Postgres numeric NaN sorts greater than everything (promoting it to rank 1). NaN is
     # reachable whenever a caller derives the boost from a score ratio. `x != x` is the portable
     # NaN test.
-    boost = (1.0 if authority_boost is None or authority_boost != authority_boost
-             else max(authority_boost, 1.0))
+    # Converted, then clamped. float() honours an int, a Decimal or a numeric string; what
+    # collapses to 1.0 (no boost) is None, NaN, +/-Infinity, and anything float() cannot
+    # represent -- a Decimal("sNaN") or an int wider than a float, both of which make
+    # math.isfinite raise rather than return False. +Infinity cannot be honoured: it is not
+    # JSON-serializable and it pins the row regardless of relevance.
+    try:
+        _b = 1.0 if authority_boost is None else float(authority_boost)
+        boost = max(_b, 1.0) if math.isfinite(_b) else 1.0
+    except (TypeError, ValueError, OverflowError):
+        boost = 1.0
     out = []
     for nid, score in best.items():
         if nid not in nodes:

@@ -26,7 +26,10 @@ Run: uv run --python 3.11 --with duckdb --with numpy graphrag_logic_smoketest.py
 """
 from __future__ import annotations
 
+import json
+import math
 import sys
+from decimal import Decimal
 
 import duckdb
 import numpy as np
@@ -602,11 +605,19 @@ def main() -> int:
         """A TRANSCRIPTION of the assemble stage of sql/graphrag_retrieval.sql, DuckDB dialect.
 
         NOT the file itself — nothing ties the two together, so any change to the real query's
-        weight, clamp, ordering or source_class handling must be mirrored here by hand. This has
-        already drifted twice: the positive-score guard and then the GREATEST clamp each landed
-        in the .sql file one step before this copy, and the suite stayed green in between.
+        weight, clamp, non-finite guard, ordering or source_class handling must be mirrored here
+        by hand. This has already drifted twice: the positive-score guard and then the GREATEST
+        clamp each landed in the .sql file one step before this copy, and the suite stayed green
+        in between. There is no automated drift detector; nothing in this suite reads the .sql.
+
+        A TRANSCRIPTION, not the file. The dialect differs throughout — json_extract_string vs
+        `->>`, DOUBLE vs numeric (DuckDB's DECIMAL cannot hold NaN), no LIMIT, fewer columns —
+        and DuckDB types each `?` independently where Postgres resolves one type for the named
+        parameter. So this exercises the guard's LOGIC and never the Postgres bind-typing path.
+        `boost` is a real bind because NaN cannot be interpolated as a bare literal. The shipped
+        spelling was verified against live Lakebase 16.15 instead.
         """
-        return acon.execute(f"""
+        return acon.execute("""
             SELECT node_id, source_class, ROUND(rank_key, 4) AS authority_score
             FROM (
                 SELECT n.node_id,
@@ -615,11 +626,14 @@ def main() -> int:
                        s.graph_score *
                            CASE WHEN json_extract_string(n.props, '$.source_method')
                                      = 'uc_certified' AND s.graph_score > 0
-                                THEN GREATEST({boost}, 1.0) ELSE 1.0 END AS rank_key
+                                THEN CASE WHEN ? = 'NaN'::DOUBLE
+                                               OR ? = 'Infinity'::DOUBLE THEN 1.0
+                                          ELSE GREATEST(?, 1.0) END
+                                ELSE 1.0 END AS rank_key
                 FROM ascored s JOIN anodes n ON n.node_id = s.node_id
             ) r
             ORDER BY rank_key DESC, node_id
-        """).fetchall()
+        """, [boost, boost, boost]).fetchall()
 
     base_sql = authority_sql(1.0)
     check("SQL: boost=1.0 orders by raw score (no-op)",
@@ -726,6 +740,54 @@ def main() -> int:
     neg_sql = authority_sql(-2.0)
     check("SQL: boost=-2.0 is clamped, ordering unchanged",
           [r[0] for r in neg_sql], [r[0] for r in base_sql])
+
+    # The non-finite guard, on BOTH halves. Without these the guard is decoration: it can be
+    # deleted from the shipped .sql and from the transcription with the whole suite still green.
+    for nf, label in [(float("nan"), "NaN"), (float("inf"), "+Inf"),
+                      (float("-inf"), "-Inf"), (None, "None")]:
+        nf_sql = authority_sql(nf)
+        check(f"SQL: boost={label} is treated as absent, ordering unchanged",
+              [r[0] for r in nf_sql], [r[0] for r in base_sql])
+        check(f"SQL: no non-finite authority_score escapes at boost={label}",
+              all(r[2] is not None and math.isfinite(float(r[2])) for r in nf_sql), True)
+
+        py_nf = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
+                               authority_boost=nf)
+        check(f"py: boost={label} is treated as absent, ordering unchanged",
+              [r["node_id"] for r in py_nf], baseline_ids)
+        check(f"py: authority_score stays JSON-serializable at boost={label}",
+              "Infinity" not in json.dumps([r["authority_score"] for r in py_nf])
+              and all(math.isfinite(r["authority_score"]) for r in py_nf), True)
+
+    # A Decimal boost must be HONOURED, not collapsed — it is what a NUMERIC bind hands back.
+    flt = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2, authority_boost=2.0)
+    try:
+        # Caught, not called bare: a regressed guard raises TypeError here (max(Decimal, 1.0)
+        # returns a Decimal, which then meets `score * weight`), and an escaping exception would
+        # abort the run instead of reporting one FAIL.
+        dec = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
+                             authority_boost=Decimal("2.0"))
+        dec_ids = [r["node_id"] for r in dec]
+    except Exception as err:
+        dec_ids = f"{type(err).__name__}: {err}"
+    check("py: a Decimal boost ranks identically to the same float",
+          dec_ids, [r["node_id"] for r in flt])
+
+    # A NUMERIC bind arrives as Decimal, and an int can exceed float range. Neither may raise out
+    # of retrieval, and neither may leak a Decimal into `score * weight`.
+    for odd, label in [(Decimal("2.0"), "Decimal(2.0)"), (Decimal("sNaN"), "Decimal(sNaN)"),
+                       (10 ** 400, "10**400"), ("2.0", "a string")]:
+        # Caught rather than called bare: a regressed guard RAISES on these, and an exception
+        # escaping here would abort the run with a traceback instead of reporting one FAIL and
+        # continuing — the failure mode this suite exists to avoid.
+        try:
+            got = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2,
+                                 authority_boost=odd)
+            ok = all(isinstance(r["authority_score"], float)
+                     and math.isfinite(r["authority_score"]) for r in got)
+        except Exception as err:                                    # noqa: BLE001
+            ok = f"{type(err).__name__}: {err}"
+        check(f"py: boost={label} does not raise and stays finite", ok, True)
 
     acon.close()
 

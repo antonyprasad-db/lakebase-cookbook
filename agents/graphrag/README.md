@@ -107,7 +107,10 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   backward-compatible, the *bind signature* is not. Bind `1.0` to keep the previous behaviour
   exactly. The Python twin defaults it to `1.0`, so Python callers need no change. Values below
   `1.0` are clamped up to `1.0` in both halves, because a fractional or negative multiplier would
-  demote the certified node the boost exists to promote. Calibrate it once a certified core actually
+  demote the certified node the boost exists to promote. **A non-finite or absent boost means "no
+  boost":** NaN, +/-Infinity and NULL all resolve to `1.0` on both halves rather than erroring,
+  since a boost derived from a score ratio can reach any of them; a Decimal or numeric string is
+  honoured normally. Calibrate it once a certified core actually
   exists — start around `1.2`-`2.0` and check against your own graph, since the useful value depends
   on the score gaps your embedding model produces, not on a portable constant.
 - **Keep a minimum Lakebase compute above zero for latency-sensitive serving.** After scale-to-zero,
@@ -238,9 +241,11 @@ cd agents/graphrag
 uv run --python 3.11 --with duckdb --with numpy smoketest/graphrag_logic_smoketest.py
 ```
 
-113 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
-authority ranking (certified-over-inferred, the positive-score and below-1.0 clamps, NaN and
-None boosts, unrounded ordering, verbatim `source_class`),
+134 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
+authority ranking (certified-over-inferred, the positive-score and below-1.0 clamps, NaN /
++Infinity / None boosts asserted on BOTH halves, odd bind types — Decimal, an int wider than a
+float, a string — reaching neither an exception nor a non-finite score, unrounded ordering,
+verbatim `source_class`),
 dangling-edge guard, blended-score ranking, depth bound, and the `seed_floor` distractor guard.
 
 ## Deploy (Asset Bundle)

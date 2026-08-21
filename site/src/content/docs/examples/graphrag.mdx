@@ -166,7 +166,7 @@ creating dangling references. Undirected `SUBSTITUTE_FOR` edges are stored once
 
 The retrieval and build logic is validated entirely offline by
 [`smoketest/graphrag_logic_smoketest.py`](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/smoketest/graphrag_logic_smoketest.py)
-— 113 assertions (on DuckDB, no Lakebase or model endpoint needed) covering the
+— 134 assertions (on DuckDB, no Lakebase or model endpoint needed) covering the
 semantic seed, graph expansion surfacing context flat RAG misses, the
 dangling-edge guard, `0.5^hop` score decay, the `max_hops` depth bound, and the
 `seed_floor` distractor guard.

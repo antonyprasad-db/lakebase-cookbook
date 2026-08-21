@@ -169,9 +169,19 @@ FROM (
         -- certified 1.00 vs inferred 0.90 at boost 0.5 ranks the inferred node first, and at
         -- -2.0 the certified node lands at -2.00. Clamping means a boost can never rank a
         -- certified node below where it would have sat unboosted, whatever is bound.
+        -- Non-finite guard. GREATEST(NaN, 1.0) is NaN and numeric NaN sorts above every
+        -- non-NaN value, so without this a NaN bind puts an arbitrary certified row at rank 1;
+        -- +Infinity survives the clamp and serializes as the non-JSON token Infinity. Both must
+        -- be NAMED: `x <> x` does not detect NaN here (measured on Lakebase 16.15,
+        -- 'NaN'::numeric <> 'NaN'::numeric is false). -Infinity and NULL need no arm, GREATEST
+        -- already yields 1.0 (also measured). Compared as numeric, matching the documented bind
+        -- type, so the parameter is never cast. Needs PG 14, which added numeric Infinity.
         s.graph_score *
             CASE WHEN n.props ->> 'source_method' = 'uc_certified' AND s.graph_score > 0
-                 THEN GREATEST(:authority_boost, 1.0) ELSE 1.0 END   AS authority_rank_key
+                 THEN CASE WHEN :authority_boost = 'NaN'::numeric
+                                OR :authority_boost = 'Infinity'::numeric THEN 1.0
+                           ELSE GREATEST(:authority_boost, 1.0) END
+                 ELSE 1.0 END                                        AS authority_rank_key
     FROM scored s
     JOIN graph.nodes n ON n.node_id = s.node_id
 ) ranked
