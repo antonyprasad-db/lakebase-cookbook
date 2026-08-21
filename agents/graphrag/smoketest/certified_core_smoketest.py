@@ -174,15 +174,18 @@ def main() -> int:
 
     # (c) enrichment_available reports CONTENT, not row width: an uncurated 4-column view is the
     # common real case and row-width checking would call it enriched.
-    B = ["# Detailed Table Information", "", "", ""]; O = ["Owner", "me@x.com", "", ""]
+    boundary_row = ["# Detailed Table Information", "", "", ""]
+    owner_row = ["Owner", "me@x.com", "", ""]
+    def enrich_of(first_row):
+        return parse_describe([first_row, boundary_row, owner_row],
+                              "c", "s", "n").enrichment_available
+
     check("4-column with empty metadata reports enrichment UNavailable",
-          parse_describe([["a", "date", "d", "{}"], B, O], "c", "s", "n").enrichment_available,
-          False)
+          enrich_of(["a", "date", "d", "{}"]), False)
     check("4-column with a real display_name reports enrichment available",
-          parse_describe([["a", "date", "d", '{"display_name": "Ship date"}'], B, O],
-                         "c", "s", "n").enrichment_available, True)
+          enrich_of(["a", "date", "d", '{"display_name": "Ship date"}']), True)
     check("3-column DESCRIBE reports enrichment UNavailable",
-          parse_describe([["a", "date", "d"], B, O], "c", "s", "n").enrichment_available, False)
+          enrich_of(["a", "date", "d"]), False)
 
     # A 3-column DESCRIBE EXTENDED (older DBR): enrichment degrades, it does not raise. NOT the
     # plain-DESCRIBE shape — that emits no detail block at all and now raises, by design.

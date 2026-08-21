@@ -1,7 +1,8 @@
 """Pure GraphRAG retrieval logic — the in-memory twin of sql/graphrag_retrieval.sql.
 
 Kept dependency-free so the agent's retrieval step is unit-testable offline and so
-mock mode needs no Lakebase. The LIVE path (see notebooks/graphrag_build_and_query.py step 4) runs the SQL against
+mock mode needs no Lakebase. The LIVE path (see notebooks/graphrag_build_and_query.py,
+step 4) runs the SQL against
 Lakebase via pgvector HNSW + recursive CTE; this module reproduces the SAME algorithm
 (cosine seed -> k-hop expansion both directions -> blended seed_sim * 0.5^hop score) so
 behavior matches and is verifiable without infra.
