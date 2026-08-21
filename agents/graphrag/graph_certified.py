@@ -100,6 +100,8 @@ _MEASURE_SUFFIX = " measure"
 # allow-list guarding string interpolation, so anything unusual should be rejected loudly
 # rather than accommodated.
 _CATALOG_RE = re.compile(r"[A-Za-z0-9_-]+")
+_SUBHEADER_TYPE_CELL = "data_type"   # literal 2nd cell of the "# col_name" sub-header row
+_SUBHEADER_NAME_CELL = "col_name"    # literal 1st cell, minus its "#"
 _DETAIL_BOUNDARY = "# Detailed Table Information"
 
 # A '#' prefix ALONE cannot mark the boundary: measures are routinely named "# Orders" or
@@ -113,6 +115,33 @@ def _is_section_header(col: str, data_type: str) -> bool:
     "# of Customers", and treating every '#' as structural truncates the field list.
     """
     return col.startswith("#") and not data_type
+
+
+def _is_column_subheader(col: str, data_type: str) -> bool:
+    """The '# col_name | data_type | comment' SUB-HEADER row: structural, never a field.
+
+    Third of the three DESCRIBE shape rules, kept with the other two so a format change breaks
+    one predicate rather than the loop.
+
+    Checked BEFORE _is_section_header, which matters: when this row renders with an EMPTY type
+    cell it satisfies the section-header test too, and letting that win latches `in_sections` and
+    silently swallows the entire field block. Measured on that rendering, ordering this first
+    parses the view correctly (fields intact, owner intact) where the other order produced no
+    fields at all.
+
+    TWO signals, either sufficient, because each single signal fails in a different direction:
+    keying on the '#' prefix alone truncates the field list (a measure named "# Orders" or
+    "# of Customers" is routine and the suite pins it), and keying on the type cell alone leaks
+    every variant rendering — measured, backquoted, double-quoted, "data type" with a space, and
+    a localized cell all slid through and re-emitted the node. Neither literal can collide with
+    real data: no Spark type is spelled "data_type", and no real measure is named "# col_name".
+
+    Known limit: a fully localized sub-header, where BOTH cells are translated, is not detected.
+    """
+    if not col.startswith("#"):
+        return False
+    return (data_type.strip().lower() == _SUBHEADER_TYPE_CELL
+            or col.lstrip("#").strip().lower() == _SUBHEADER_NAME_CELL)
 
 
 def _is_detail_boundary(col: str) -> bool:
@@ -163,6 +192,18 @@ class CertifiedView:
     # nothing but its name to embed, and both the README and the notebook tell the reader to
     # embed with embedding_text() rather than the bare name.
     comment: str = ""
+    # Whether any field actually carried enrichment (a display_name or synonyms). Defaults to
+    # FALSE on purpose: this is an observation, so only the code path that looked may claim it was
+    # there. A hand-built CertifiedView, or one of the alternative producers the module docstring
+    # mentions, would otherwise silently report enrichment it never read.
+    #
+    # It tests CONTENT, not the row WIDTH. An uncurated view returns four columns with an empty or
+    # '{}' metadata cell on every row, which is the common real case — checking `len(row) > 3`
+    # would call that enriched. Tolerating the absence is right (name, type and the measure flag
+    # still load); being silent about it is not, because display_name and synonyms are what make
+    # the certified core reachable by semantic seed at all — nobody asks a question using
+    # `total_revenue` — and authority ranking only re-orders what retrieval already found.
+    enrichment_available: bool = False
 
     @property
     def fqn(self) -> str:
@@ -238,6 +279,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
     fields: list[SemanticField] = []
     meta: dict[str, str] = {}
     in_detail = False
+    saw_enrichment = False
     in_sections = False
     saw_boundary = False
 
@@ -259,6 +301,11 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         # column, all tagged uc_certified and therefore boosted as authoritative. Anchoring on
         # "before the first header" makes the section's contents unreachable regardless of what
         # shape they take.
+        # Before the section-header test on purpose — see _is_column_subheader's docstring: with
+        # an empty type cell this row looks like a section header, and letting that win swallows
+        # the whole field block.
+        if _is_column_subheader(col, val):
+            continue
         if _is_section_header(col, val):
             in_sections = True
             if _is_detail_boundary(col):
@@ -268,7 +315,18 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         if in_sections and not in_detail:
             continue    # inside a non-detail section: sub-header or body, never a field
         if in_detail:
-            meta[col] = val
+            # First NON-EMPTY write wins. The real detail block is read before anything following
+            # it, so a later section cannot beat it — that closes the overwrite where a following
+            # block's own Owner or Comment row replaced the authority metadata (and `comment`
+            # feeds embedding_text(), so the node ended up embedded from a foreign section while
+            # still tagged uc_certified).
+            #
+            # The `val and` half matters independently: a plain setdefault makes an EMPTY first
+            # value permanent, so a blank Owner or Comment row followed by a populated one
+            # discarded the real value — which certified_rows() then omits entirely, leaving the
+            # MetricView node with only its name to embed. Last-write-wins used to recover that.
+            if val and col not in meta:
+                meta[col] = val
             continue
 
         if not val:
@@ -285,6 +343,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         data_type = val[: -len(_MEASURE_SUFFIX)].strip() if is_measure else val
 
         display_name, synonyms = "", ()
+        # set below, once we know the parse actually produced something
         if raw_meta:
             # Malformed metadata must not lose the field: the name, type and measure flag are
             # the load-bearing parts, and display_name/synonyms are enrichment.
@@ -305,6 +364,8 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
                 synonyms = (tuple(x for x in syn if isinstance(x, str) and x)
                             if isinstance(syn, list) else ())
 
+        if display_name or synonyms:
+            saw_enrichment = True
         fields.append(SemanticField(
             name=col, data_type=data_type, comment=comment,
             is_measure=is_measure, display_name=display_name, synonyms=synonyms,
@@ -336,7 +397,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
     return CertifiedView(
         catalog=catalog, schema=schema, name=name, fields=tuple(fields),
         owner=meta.get("Owner", ""), created_at=meta.get("Created Time", ""),
-        comment=meta.get("Comment", ""),
+        comment=meta.get("Comment", ""), enrichment_available=saw_enrichment,
     )
 
 

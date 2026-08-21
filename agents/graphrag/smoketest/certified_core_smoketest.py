@@ -129,6 +129,61 @@ def main() -> int:
           next(f.is_measure for f in hashed.fields if f.name == "# Orders"), True)
     check("the real boundary still ends the field block", hashed.owner, "me@example.com")
 
+    # (a) A section AFTER the detail block must not overwrite metadata already read from it, and
+    # a BLANK first value must not win either — a plain setdefault made an empty Owner permanent.
+    # CONSTRUCTED SHAPE: Spark folds storage keys into the detail block and emits no separate
+    # '# Storage Information' section, so this pins the parser, not observed output.
+    lat = parse_describe(
+        [["a", "int", "", ""],
+         ["# Detailed Table Information", "", "", ""],
+         ["Owner", "real@example.com", "", ""], ["Comment", "the real comment", "", ""],
+         ["# Storage Information", "", "", ""],
+         ["Owner", "junk", "", ""], ["Comment", "a storage param", "", ""]],
+        "c", "s", "n")
+    check("a later section does not overwrite the owner", lat.owner, "real@example.com")
+    check("a later section does not overwrite the comment", lat.comment, "the real comment")
+    check("a later section's rows do not become certified fields",
+          [f.name for f in lat.fields], ["a"])
+    blank = parse_describe(
+        [["a", "int", "", ""],
+         ["# Detailed Table Information", "", "", ""],
+         ["Owner", "", "", ""], ["Comment", "", "", ""],
+         ["# Storage Information", "", "", ""],
+         ["Owner", "real@example.com", "", ""], ["Comment", "the real comment", "", ""]],
+        "c", "s", "n")
+    check("a BLANK first value does not win over a later real one", blank.owner, "real@example.com")
+    check("...same for the comment", blank.comment, "the real comment")
+
+    # (b) The '# col_name' sub-header is structural in every rendering, and — checked before the
+    # section-header test — an EMPTY type cell no longer swallows the whole field block.
+    for variant, label in [("data_type", "exact"), ("DATA_TYPE", "upper"),
+                           ("`data_type`", "backquoted"), ('"data_type"', "quoted"),
+                           ("data type", "spaced"), ("tipo_dato", "localized type"),
+                           ("", "EMPTY type cell")]:
+        v = parse_describe(
+            [["# col_name", variant, "comment", ""],
+             ["ship_date", "date", "d", "{}"],
+             ["# Orders", "bigint measure", "count", "{}"],
+             ["# Detailed Table Information", "", "", ""],
+             ["Owner", "me@example.com", "", ""]],
+            "c", "s", "n")
+        check(f"sub-header ({label}) is structural, field block intact",
+              [f.name for f in v.fields], ["ship_date", "# Orders"])
+        check(f"...and '# Orders' keeps its measure flag ({label})",
+              next((f.is_measure for f in v.fields if f.name == "# Orders"), None), True)
+
+    # (c) enrichment_available reports CONTENT, not row width: an uncurated 4-column view is the
+    # common real case and row-width checking would call it enriched.
+    B = ["# Detailed Table Information", "", "", ""]; O = ["Owner", "me@x.com", "", ""]
+    check("4-column with empty metadata reports enrichment UNavailable",
+          parse_describe([["a", "date", "d", "{}"], B, O], "c", "s", "n").enrichment_available,
+          False)
+    check("4-column with a real display_name reports enrichment available",
+          parse_describe([["a", "date", "d", '{"display_name": "Ship date"}'], B, O],
+                         "c", "s", "n").enrichment_available, True)
+    check("3-column DESCRIBE reports enrichment UNavailable",
+          parse_describe([["a", "date", "d"], B, O], "c", "s", "n").enrichment_available, False)
+
     # A 3-column DESCRIBE EXTENDED (older DBR): enrichment degrades, it does not raise. NOT the
     # plain-DESCRIBE shape — that emits no detail block at all and now raises, by design.
     three = parse_describe([["total_revenue", "decimal(10,2) measure", "rev"],

@@ -231,17 +231,37 @@ if CERTIFIED_CATALOG:
         try:
             view = read_metric_view(reader, cat, sch, name)
             rows = certified_rows(view)
-        except ValueError as e:
-            skipped.append((f"{cat}.{sch}.{name}", str(e)))
+        except Exception as e:
+            # Exception, not ValueError: ValueError covers only this module's own refusals, while
+            # the likeliest real failure comes from spark.sql inside read_metric_view — an
+            # AnalysisException for PERMISSION_DENIED (BROWSE but not SELECT on one view, which
+            # information_schema still lists) or TABLE_OR_VIEW_NOT_FOUND (dropped between
+            # discovery and DESCRIBE). Neither is a ValueError, so the cell used to abort mid-loop
+            # and discard every row already built. The type is recorded so a permission problem
+            # reads differently from a shape this module rejected on purpose.
+            skipped.append((f"{cat}.{sch}.{name}", f"{type(e).__name__}: {e}"))
             continue
         certified_nodes.extend(rows.nodes)
         certified_edges.extend(rows.edges)
         measures = sum(1 for f in view.fields if f.is_measure)
+        enrich = ("" if view.enrichment_available
+                  else "  [!] no display_name/synonyms: reachable only by raw column name")
         print(f"  {view.fqn}: {measures} measure(s), "
-              f"{len(view.fields) - measures} dimension(s), owner={view.owner or 'unknown'}")
+              f"{len(view.fields) - measures} dimension(s), "
+              f"owner={view.owner or 'unknown'}{enrich}")
 
     for fqn, why in skipped:
         print(f"  SKIPPED {fqn}: {why}")
+
+    if views and not certified_nodes:
+        # Every view skipped is not "all your views are awkward" — it is far likelier that nothing
+        # ran: no Spark session, a workspace-wide DESCRIBE format change, or a permission problem
+        # on the whole catalog. Without this the cell prints "0 certified node(s) ready to load"
+        # and the load-them-yourself paragraph, which reads as success.
+        raise RuntimeError(
+            f"all {len(views)} discovered view(s) were skipped — see the SKIPPED lines above; "
+            "this is a systemic failure, not a per-view one"
+        )
 
     print(f"\n{len(certified_nodes)} certified node(s) and "
           f"{len(certified_edges)} edge(s) ready to load.")
