@@ -303,8 +303,8 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         # and the body being read as fields: measured, that produced
         # `dimension:<fqn>.# col_name` with props.data_type = "data_type", plus every partition
         # column, all tagged uc_certified and therefore boosted as authoritative. Anchoring on
-        # "before the first header" makes the section's contents unreachable regardless of what
-        # shape they take.
+        # "before the first header" makes a section's rows unreachable AS FIELDS regardless of
+        # what shape they take. The detail section's rows are still read, as metadata, below.
         # Before the section-header test on purpose — see _is_column_subheader's docstring: with
         # an empty type cell this row looks like a section header, and letting that win swallows
         # the whole field block.
@@ -312,8 +312,16 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
             continue
         if _is_section_header(col, val):
             in_sections = True
-            if _is_detail_boundary(col):
-                in_detail = True
+            # Track the CURRENT section. Not latching matters more than the interior-marker risk
+            # it reintroduces: measured, a metric view with a blank Comment in its real detail
+            # block took owner='hive' and comment='auto-generated storage descriptor' from a
+            # following '# Storage Information' section, and comment feeds embedding_text(), so
+            # the node was embedded from a foreign section while tagged uc_certified. A view with
+            # no description is common; a '#'-prefixed empty-value row INSIDE the detail block is
+            # a shape Spark does not emit. First-non-empty-write-wins below still guards the
+            # ordering within the real block.
+            in_detail = _is_detail_boundary(col)
+            if in_detail:
                 saw_boundary = True
             continue
         if in_sections and not in_detail:

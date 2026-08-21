@@ -144,15 +144,55 @@ def main() -> int:
     check("a later section does not overwrite the comment", lat.comment, "the real comment")
     check("a later section's rows do not become certified fields",
           [f.name for f in lat.fields], ["a"])
+    # A BLANK value in the real detail block must NOT be filled from a following section. This
+    # assertion previously demanded the opposite, which locked in the bug: a metric view with no
+    # description took its owner and comment from a '# Storage Information' block, and comment
+    # feeds embedding_text(), so the node was embedded from a foreign section while still tagged
+    # uc_certified. Views without a description are common, so this is the case that matters.
     blank = parse_describe(
         [["a", "int", "", ""],
          ["# Detailed Table Information", "", "", ""],
          ["Owner", "", "", ""], ["Comment", "", "", ""],
          ["# Storage Information", "", "", ""],
-         ["Owner", "real@example.com", "", ""], ["Comment", "the real comment", "", ""]],
+         ["Owner", "junk", "", ""], ["Comment", "a storage param", "", ""]],
         "c", "s", "n")
-    check("a BLANK first value does not win over a later real one", blank.owner, "real@example.com")
-    check("...same for the comment", blank.comment, "the real comment")
+    check("a foreign section does not fill a blank owner", blank.owner, "")
+    check("a foreign section does not fill a blank comment", blank.comment, "")
+
+    # Partition columns are skipped by the section anchor, not by the sub-header rule: a real
+    # '# Partition Information' header latches in_sections, and the '# col_name' row inside it
+    # does not clear it. A bare '# col_name' with no preceding section header is the MAIN column
+    # list, so the rows after it are fields — that is the intended reading, not a leak.
+    part = parse_describe(
+        [["a", "int", "", ""],
+         ["# Partition Information", "", "", ""],
+         ["# col_name", "data_type", "comment", ""],
+         ["p", "string", "partition col", ""],
+         ["# Detailed Table Information", "", "", ""],
+         ["Owner", "me@example.com", "", ""]],
+        "c", "s", "n")
+    check("a partition-column block is skipped, not emitted as certified fields",
+          [f.name for f in part.fields], ["a"])
+
+    # KNOWN LIMIT OF THE NON-LATCHING BOUNDARY, pinned rather than argued. A '#'-prefixed row
+    # with an EMPTY second cell INSIDE the detail block satisfies _is_section_header, so it ends
+    # the detail block early and the Owner/Comment rows after it are dropped. Spark is not known
+    # to emit that shape, but that is a reachability argument, not a mechanism refutation — so the
+    # behaviour is asserted here instead, and the direction matters: the value is LOST (blank),
+    # never taken from a foreign section. A blank owner is recoverable; an owner silently
+    # inherited from '# Storage Information' and embedded as uc_certified is not, which is why
+    # the trade-off went this way. Flip this assertion if a real DESCRIBE ever emits the shape.
+    interior = parse_describe(
+        [["a", "int", "", ""],
+         ["# Detailed Table Information", "", "", ""],
+         ["Owner", "me@example.com", "", ""],
+         ["# some interior marker", "", "", ""],
+         ["Comment", "dropped because the marker ended the block", "", ""]],
+        "c", "s", "n")
+    check("an interior '#' marker ends the detail block: the owner before it survives",
+          interior.owner, "me@example.com")
+    check("...and the comment after it is LOST, not filled from elsewhere",
+          interior.comment, "")
 
     # (b) The '# col_name' sub-header is structural in every rendering, and — checked before the
     # section-header test — an EMPTY type cell no longer swallows the whole field block.
