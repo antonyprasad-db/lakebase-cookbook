@@ -201,13 +201,15 @@ halves.
 **`source_class` is passed through verbatim, not normalised to two values.** It is whatever
 `n.props ->> 'source_method'` holds, defaulting to `inferred` only when the key is absent, so any
 producer's own label survives. In practice today you will see only `uc_certified` or `inferred`,
-because nothing in this repo writes `source_method` into **node** props yet — the `structured` and
+because [`graph_certified.py`](graph_certified.py) below builds nodes carrying `uc_certified`
+(**it writes nothing** — it returns rows and loading is the caller's job) and notebook step 4b sets
+the same key by hand. The `structured` and
 `llm_enrichment` values in [`sql/gold_triplets_mapping.sql`](sql/gold_triplets_mapping.sql) are
 **edge** provenance (`e.props`), a different table. The pass-through is future-proofing rather than a
 current collision. Only `uc_certified` is boosted; every other value carries weight `1.0`.
 **Branch on `== 'uc_certified'`, never on `!= 'inferred'`.**
 
-**Where certified nodes come from is deliberately not this example's business.** Anything that can
+**Ranking is independent of any one producer.** Anything that can
 write the `props` key participates — a Unity Catalog semantics exporter, a curation UI, a hand-written
 insert. That keeps the ranking seam independent of any one producer's availability, and it is why this
 half carries no new prerequisite beyond what the example already needs.

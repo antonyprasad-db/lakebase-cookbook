@@ -275,6 +275,10 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
 
     Raises ValueError if the boundary is absent (the metadata block would otherwise be emitted
     as certified fields) or if a field name repeats (duplicate primary keys downstream).
+
+    Three DESCRIBE shape assumptions live in the predicates above, not here: the ` measure`
+    type suffix, the `# Detailed Table Information` boundary row, and the
+    `# col_name`/`data_type` sub-header literals.
     """
     fields: list[SemanticField] = []
     meta: dict[str, str] = {}

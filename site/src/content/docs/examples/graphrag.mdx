@@ -106,8 +106,9 @@ The [retrieval SQL](https://github.com/databricks-solutions/lakebase-cookbook/tr
      negative score *more* negative and demote the very node the boost exists to
      promote.
    - **`source_class` is passed through verbatim**, not normalised to two values, so any
-     producer's label survives. In practice today it is `uc_certified` or `inferred`, since
-     nothing writes `source_method` into node props yet. Only `uc_certified` is boosted;
+     producer's label survives. In practice it is `uc_certified` or `inferred`: the
+     certified-core builder below produces the former, though **it writes nothing** — it
+     returns rows and you load them. Only `uc_certified` is boosted;
      everything else carries weight `1.0`. Branch on equality with `uc_certified`, never on
      inequality with `inferred`.
    - **A boost below `1.0` is clamped up to `1.0`**, for the same reason: a fractional or
