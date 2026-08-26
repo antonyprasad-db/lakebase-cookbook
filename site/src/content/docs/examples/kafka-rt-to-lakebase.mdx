@@ -1,0 +1,63 @@
+---
+title: Ingest from Kafka w/Real-Time Pipelines
+sidebar_label: Source from Kafka
+category: Ingestion
+sidebar_position: 53
+description: Ingest data from Kafka and land it in Lakebase with ultra low latency
+---
+import Callout from '../../../components/Callout.astro';
+
+# Ingest from Kafka to Lakebase w/Real-Time Pipelines
+
+The fastest way to ingest data directly to lakebase for sub-second latency is by ingesting directly from a Kafka
+broker and processing the data in real-time with [real-time mode](https://docs.databricks.com/aws/en/structured-streaming/real-time/concepts)
+pipelines.
+
+![Kafka real-time to Lakebase architecture](/img/kafka-rt-to-lakebase-architecture.png)
+
+This pattern requires more setup and has higher requirements, but the rewards are well worth the effort for low
+latency scenarios. You'll need:
+
+* **An existing Kafka broker** and [a way to authenticate against it from within Spark](https://docs.databricks.com/aws/en/connect/streaming/kafka/authentication).
+* **A UC volume** for a checkpoint location
+* **A Lakebase instance** (of course).
+* **A classic cluster with at least 10 vCPUs total in single-user-mode.** We recommend deploying the
+pipeline to a job for long term production usage.
+
+
+<Callout type="note" title="Further Reading">
+    See [our documentation on real-time mode](https://docs.databricks.com/aws/en/structured-streaming/real-time/concepts)
+    to understand real-time mode's requirements and limitations.
+</Callout>
+
+## When to Use This Approach
+
+**Use this approach when you need the absolute lowest latency possible.** This is the ultimate in real
+time ingestion directly to Lakebase, and will provide modern applications with the ultra low latency
+they require to be performant and responsive.
+
+## When *Not* to Use This Approach
+
+Avoid this approach when sub-second latency isn't your highest priority. If costs comes first, consider
+the Zerobus approach instead, or any other method based on synced tables. You should additionally disregard this
+approach if it's more critical that data lands in UC first for analytics, as this approach skips UC and lands directly
+in Lakebase. You can still access your data for analytics with [LTAP](https://docs.databricks.com/aws/en/oltp/projects/ltap-overview), however.
+
+## Getting Started
+
+<Callout type="note" title="Source">
+    The full example lives in
+    [`data/kafka_rt_to_lakebase/`](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/data/kafka_rt_to_lakebase).
+</Callout>
+
+Included is a notebook (`ingest_from_kafka_to_lakebase.ipynb`) with starter pipeline code, and
+instructions on how to set it up. Out of the box it's built with AWS MSK in mind as the Kafka broker,
+but any supported Kafka broker will work as long as you have network connectivity to it and can
+[authenticate against it](https://docs.databricks.com/aws/en/connect/streaming/kafka/authentication).
+
+The notebook writes to Lakebase with
+[lakebase-foreachwriter](https://github.com/christophergrant/lakebase-foreachwriter); you will need to install this library or use the `LakebaseForEachWriter.py` file directly.
+For production usage we recommend installing `lakebase-foreachlibrary` as a library for proper dependency management.
+
+We've also included a script `publish_to_aws_kafka.py` for testing purposes. It, too, is built for AWS
+MSK out of the box; it's intended to help you end-to-end verify your pipeline.
