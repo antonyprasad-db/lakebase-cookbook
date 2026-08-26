@@ -15,6 +15,7 @@ export const CATEGORY_ORDER = [
   'Developer Experience',
   'Apps',
   'Data',
+  'Ingestion',
 ];
 
 export const EXAMPLES: ExampleCard[] = [
@@ -118,4 +119,23 @@ export const EXAMPLES: ExampleCard[] = [
     href: '/docs/examples/reverse-etl/',
     status: 'soon',
   },
+  {
+    category: 'Ingestion',
+    tag: 'Source from Kafka',
+    title: 'Ingest from Kafka w/Real-Time Mode',
+    bracket: 'sub-second, pipelines, real-time mode',
+    description: 'Ingest data from Kafka and land it in Lakebase with ultra low latency',
+    href: '/docs/examples/kafka-rt-to-lakebase/',
+    status: 'ready',
+  },
+  {
+    category: 'Ingestion',
+    tag: 'Source from Zerobus',
+    title: 'Ingest with Zerobus and Synced Tables',
+    bracket: 'zerobus, synced tables, near-real-time',
+    description:
+      'Land data in a Delta table using Zerobus, then automatically sync it to Lakebase with synced tables',
+    href: '/docs/examples/zerobus-to-lakebase/',
+    status: 'ready',
+  }
 ];

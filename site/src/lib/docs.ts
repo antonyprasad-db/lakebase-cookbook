@@ -42,6 +42,7 @@ const CATEGORY_POSITIONS: Record<string, number> = {
   'Developer Experience': 20,
   Apps: 30,
   Data: 40,
+  Ingestion: 50,
 };
 
 const docHref = (id: string) => `/docs/${id === 'intro' ? '' : id + '/'}`;
