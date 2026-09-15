@@ -20,6 +20,7 @@ joined. We block candidates by character-trigram similarity and merge with union
 Output lands in the 8-column `gold_triplets` contract (see `sql/gold_triplets_mapping.sql`), so
 embeddings and Lakebase sync downstream are unchanged.
 """
+
 from __future__ import annotations
 
 import re
@@ -43,9 +44,15 @@ SYMMETRIC_PREDICATES = frozenset({"SUBSTITUTE_FOR"})
 # spelling becomes its own edge label, so the relation namespace fragments and the typed-path
 # logic in sql/graphrag_retrieval.sql degrades toward an untyped walk. Entity types are already
 # constrained by the response schema; predicates need the same treatment.
-DEFAULT_PREDICATES = frozenset({
-    "SUPPLIED_BY", "LOCATED_IN", "BELONGS_TO", "SUBSTITUTE_FOR", "SURGES_IN",
-})
+DEFAULT_PREDICATES = frozenset(
+    {
+        "SUPPLIED_BY",
+        "LOCATED_IN",
+        "BELONGS_TO",
+        "SUBSTITUTE_FOR",
+        "SURGES_IN",
+    }
+)
 
 
 # --------------------------------------------------------------------------- chunk
@@ -72,7 +79,7 @@ def _split_oversized(segment: str, size: int) -> list[str]:
             buf = word
         else:
             buf = f"{buf} {word}".strip()
-        while len(buf) > size:          # a single word longer than `size`
+        while len(buf) > size:  # a single word longer than `size`
             pieces.append(buf[:size])
             buf = buf[size:]
     if buf:
@@ -88,7 +95,7 @@ def _tail(text: str, overlap: int) -> str:
     tail = text[-overlap:]
     if len(text) > overlap and not text[-overlap - 1].isspace():
         cut = tail.find(" ")
-        tail = tail[cut + 1:] if cut != -1 else ""
+        tail = tail[cut + 1 :] if cut != -1 else ""
     return tail.strip()
 
 
@@ -124,6 +131,7 @@ def chunk(doc_id: str, text: str, size: int = 240, overlap: int = 40) -> list[Pa
 @dataclass
 class Mention:
     """One extracted triple, still carrying raw (unresolved) entity surface forms."""
+
     subject: str
     subject_type: str
     predicate: str
@@ -153,7 +161,7 @@ def normalize_predicate(raw: str) -> str:
 # --------------------------------------------------------------------------- entity resolution
 def _trigrams(s: str) -> set[str]:
     s = "  " + re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip() + "  "
-    return {s[i:i + 3] for i in range(len(s) - 2)}
+    return {s[i : i + 3] for i in range(len(s) - 2)}
 
 
 def trigram_sim(a: str, b: str) -> float:
@@ -194,13 +202,18 @@ def canonical_id(name: str, node_type: str) -> str:
 @dataclass
 class Resolution:
     """Keyed by (surface_form, entity_type), not surface alone — see canonical_id()."""
+
     canonical_id: dict[tuple[str, str], str] = field(default_factory=dict)
-    canonical_name: dict[str, str] = field(default_factory=dict)   # canonical id -> display name
+    canonical_name: dict[str, str] = field(default_factory=dict)  # canonical id -> display name
     same_as: list[tuple[str, str, str]] = field(default_factory=list)  # (surface, type, canon id)
 
 
-def resolve_entities(mentions: list[Mention], threshold: float = 0.55,
-                     containment_threshold: float = 0.8, min_trigrams: int = 4) -> Resolution:
+def resolve_entities(
+    mentions: list[Mention],
+    threshold: float = 0.55,
+    containment_threshold: float = 0.8,
+    min_trigrams: int = 4,
+) -> Resolution:
     """Trigram blocking plus union-find: merge same-type surface forms that look like aliases.
 
     Two forms merge when EITHER measure clears its threshold:
@@ -245,12 +258,14 @@ def resolve_entities(mentions: list[Mention], threshold: float = 0.55,
     for i in range(len(keys)):
         for j in range(i + 1, len(keys)):
             a, b = keys[i], keys[j]
-            if a[1] != b[1]:                      # only same-type forms are candidates
+            if a[1] != b[1]:  # only same-type forms are candidates
                 continue
             if trigram_sim(a[0], b[0]) >= threshold:
                 parent[find(a)] = find(b)
-            elif (min(len(_trigrams(a[0])), len(_trigrams(b[0]))) >= min_trigrams
-                    and trigram_containment(a[0], b[0]) >= containment_threshold):
+            elif (
+                min(len(_trigrams(a[0])), len(_trigrams(b[0]))) >= min_trigrams
+                and trigram_containment(a[0], b[0]) >= containment_threshold
+            ):
                 parent[find(a)] = find(b)
 
     clusters: dict[tuple[str, str], list[tuple[str, str]]] = {}
@@ -273,10 +288,14 @@ def resolve_entities(mentions: list[Mention], threshold: float = 0.55,
 
 
 # --------------------------------------------------------------------------- assemble
-def build_gold_triplets(mentions: list[Mention], res: Resolution, *,
-                        source_agent: str = "graphrag-upstream",
-                        allowed_predicates: frozenset[str] | None = None,
-                        on_unknown: str = "keep") -> list[dict]:
+def build_gold_triplets(
+    mentions: list[Mention],
+    res: Resolution,
+    *,
+    source_agent: str = "graphrag-upstream",
+    allowed_predicates: frozenset[str] | None = None,
+    on_unknown: str = "keep",
+) -> list[dict]:
     """Rewrite mentions onto canonical ids and emit gold_triplets rows.
 
     Also emits one SAME_AS row per merged alias, so the resolution decision is auditable in the
@@ -315,13 +334,18 @@ def build_gold_triplets(mentions: list[Mention], res: Resolution, *,
         pred = normalize_predicate(m.predicate)
         if not (m.subject or "").strip() or not (m.object or "").strip() or not pred:
             continue
-        if (allowed_predicates is not None and on_unknown == "drop"
-                and pred not in allowed_predicates):
+        if (
+            allowed_predicates is not None
+            and on_unknown == "drop"
+            and pred not in allowed_predicates
+        ):
             continue
-        s_id = res.canonical_id.get((m.subject, m.subject_type),
-                                    canonical_id(m.subject, m.subject_type))
-        o_id = res.canonical_id.get((m.object, m.object_type),
-                                   canonical_id(m.object, m.object_type))
+        s_id = res.canonical_id.get(
+            (m.subject, m.subject_type), canonical_id(m.subject, m.subject_type)
+        )
+        o_id = res.canonical_id.get(
+            (m.object, m.object_type), canonical_id(m.object, m.object_type)
+        )
         s_type, o_type = m.subject_type, m.object_type
         if pred in SYMMETRIC_PREDICATES and s_id > o_id:
             s_id, o_id = o_id, s_id
@@ -330,32 +354,51 @@ def build_gold_triplets(mentions: list[Mention], res: Resolution, *,
         if key in seen:
             continue
         seen.add(key)
-        rows.append({
-            "subject_id": s_id, "subject_type": s_type, "predicate": pred,
-            "object_id": o_id, "object_type": o_type, "confidence": _conf(m.confidence),
-            "source_method": "llm_extract", "source_agent": source_agent,
-        })
+        rows.append(
+            {
+                "subject_id": s_id,
+                "subject_type": s_type,
+                "predicate": pred,
+                "object_id": o_id,
+                "object_type": o_type,
+                "confidence": _conf(m.confidence),
+                "source_method": "llm_extract",
+                "source_agent": source_agent,
+            }
+        )
     for surface, kind, cid in res.same_as:
         alias_id = canonical_id(surface, kind)
         key = (alias_id, "SAME_AS", cid)
         if alias_id == cid or key in seen:
             continue
         seen.add(key)
-        rows.append({
-            # the resolved type, NOT a literal "Entity": graph.nodes.node_type is single-valued,
-            # so a SAME_AS row typed differently from the same node's relation rows would make
-            # the ingested node type depend on row order.
-            "subject_id": alias_id, "subject_type": kind, "predicate": "SAME_AS",
-            "object_id": cid, "object_type": kind, "confidence": 1.0,
-            "source_method": "entity_resolution", "source_agent": source_agent,
-        })
+        rows.append(
+            {
+                # the resolved type, NOT a literal "Entity": graph.nodes.node_type is single-valued,
+                # so a SAME_AS row typed differently from the same node's relation rows would make
+                # the ingested node type depend on row order.
+                "subject_id": alias_id,
+                "subject_type": kind,
+                "predicate": "SAME_AS",
+                "object_id": cid,
+                "object_type": kind,
+                "confidence": 1.0,
+                "source_method": "entity_resolution",
+                "source_agent": source_agent,
+            }
+        )
     return rows
 
 
-def index_document(doc_id: str, text: str, extractor: Extractor, *,
-                   source_agent: str = "graphrag-upstream",
-                   allowed_predicates: frozenset[str] | None = None,
-                   on_unknown: str = "keep") -> list[dict]:
+def index_document(
+    doc_id: str,
+    text: str,
+    extractor: Extractor,
+    *,
+    source_agent: str = "graphrag-upstream",
+    allowed_predicates: frozenset[str] | None = None,
+    on_unknown: str = "keep",
+) -> list[dict]:
     """End to end: chunk -> extract -> resolve -> gold_triplets rows.
 
     Parse happens upstream of this — pass already-parsed text, e.g. the output of
@@ -365,5 +408,10 @@ def index_document(doc_id: str, text: str, extractor: Extractor, *,
     passages = chunk(doc_id, text)
     mentions = extractor(passages)
     res = resolve_entities(mentions)
-    return build_gold_triplets(mentions, res, source_agent=source_agent,
-                               allowed_predicates=allowed_predicates, on_unknown=on_unknown)
+    return build_gold_triplets(
+        mentions,
+        res,
+        source_agent=source_agent,
+        allowed_predicates=allowed_predicates,
+        on_unknown=on_unknown,
+    )

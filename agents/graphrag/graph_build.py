@@ -4,6 +4,7 @@ Kept dependency-free (no spark, no databricks.sdk) so the build logic can be uni
 offline. Notebook 02 imports `assemble_graph`; the smoke test imports it too and asserts the
 resulting nodes/edges match the intended supply-chain knowledge graph.
 """
+
 from __future__ import annotations
 
 
@@ -48,8 +49,9 @@ def assemble_graph(products, suppliers, supplies, surges, enrichment):
     for p in products:
         pid = p["product_id"]
         desc = enrichment.get(pid, {}).get("description", p["name"])
-        add_node(f"product:{pid}", "Product", p["name"],
-                 {"category": p["category"], "description": desc})
+        add_node(
+            f"product:{pid}", "Product", p["name"], {"category": p["category"], "description": desc}
+        )
         add_node(category_key(p["category"]), "Category", p["category"])
         add_edge(f"product:{pid}", category_key(p["category"]), "BELONGS_TO")
 
@@ -57,8 +59,7 @@ def assemble_graph(products, suppliers, supplies, surges, enrichment):
     for s in suppliers:
         add_node(f"supplier:{s['supplier_id']}", "Supplier", s["name"], {"city": s.get("city")})
         reg = s["region"]
-        add_node(region_key(reg), "Region", reg,
-                 path=f"us.{reg.strip().lower().replace(' ', '_')}")
+        add_node(region_key(reg), "Region", reg, path=f"us.{reg.strip().lower().replace(' ', '_')}")
         add_edge(f"supplier:{s['supplier_id']}", region_key(reg), "LOCATED_IN")
 
     # product SUPPLIED_BY supplier (product may be absent from the products dim)
@@ -79,7 +80,9 @@ def assemble_graph(products, suppliers, supplies, surges, enrichment):
 
     if dropped:
         tail = " ..." if len(dropped) > 5 else ""
-        print(f"[graph_build] dropped {len(dropped)} edge(s) with missing endpoint(s): "
-              f"{dropped[:5]}{tail}")
+        print(
+            f"[graph_build] dropped {len(dropped)} edge(s) with missing endpoint(s): "
+            f"{dropped[:5]}{tail}"
+        )
 
     return nodes, edges
