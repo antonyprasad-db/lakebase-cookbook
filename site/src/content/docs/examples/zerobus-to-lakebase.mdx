@@ -1,0 +1,77 @@
+---
+title: Ingest to Lakebase w/Zerobus
+sidebar_label: Source from Zerobus
+category: Ingestion
+sidebar_position: 52
+description: Land data in a Delta table using Zerobus, then automatically sync it to Lakebase with synced tables
+---
+import Callout from '../../../components/Callout.astro';
+
+# Ingest to Lakebase from Zerobus in Near-Real-Time
+
+Ingesting data pushed to [Zerobus](https://docs.databricks.com/aws/en/ingestion/zerobus-overview) is a very
+straightforward architecture: land data in a Delta table using Zerobus, then create a
+[synced table](https://docs.databricks.com/aws/en/oltp/projects/sync-tables) on top of that which automatically mirrors
+your data into Lakebase for you.
+
+This carries the advantage of more configurable costing and scheduling, while ensuring data is immediately available
+in UC for analytics.
+
+
+![Zerobus to Lakebase architecture](/img/zerobus-to-lakebase-architecture.png)
+
+You'll need:
+
+* **A service principal** with `SELECT` and `MODIFY` privileges on the target Delta table
+* [**Change Data Feed**](https://docs.databricks.com/aws/en/tables/features/change-data-feed#turn-on-legacy-change-data-feed) must be enabled on the target delta table
+* [Optional] **A scheduled job to trigger the sync to Lakebase**
+
+That's it! On continuous mode, data will land in Lakebase within about 15 seconds. For append-only zerobus ingestion,
+we recommend setting your synced table to [triggered mode](https://docs.databricks.com/aws/en/oltp/projects/sync-tables#sync-modes),
+as append-only workloads won't result in data changing.
+
+## When to Use This Approach
+
+**Use this approach when you need near-real-time data** without a maintenance overhead cost. It's
+slower than ingesting directly to Lakebase with Spark Real Time Mode (which runs in sub-second time),
+but your pipeline is more flexible and is managed + scaled for you.
+
+**Also use this approach if you are cost-sensitive.** You can sacrifice ingestion speed for cost
+improvements by switching to triggered mode, running your table based on your actual SLA instead of
+as-fast-as-possible.
+
+
+If you have existing Kafka producers, *don't* use a fan-out pattern from your broker, and *don't* need
+actually-real-time processing, this is a good option for you. In this specific case, Zerobus will let
+you wipe out your Kafka broker overhead entirely — it's a zero-bus architecture.
+
+## When *Not* to Use This Approach
+
+Don't use this approach when you need sub-second latency or similar; synced tables are fast but the SLA is around 15
+seconds in the fastest mode.
+
+If you have a hardcore requirement for a Kafka fanout architecture, this architecture may not be for you. The key is
+that producers have to write directly to Zerobus instead of a Kafka broker (optionally using the [Kafka APIs for Zerobus](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka)).
+That lets you wipe out your broker (hence the name "zero bus"), but Zerobus itself is not a message bus so you won't be
+able to fan out from Zerobus. You'd have to configure your producers to write to Zerobus *in addition* to your existing
+broker; if this is fine with you then go for it! If not, it might be worth investigating ingesting directly from Kafka.
+
+## Taking it Further
+
+Ingestion from zerobus doesn't have to mean raw data. You can stream changes to your Delta table and process data
+incrementally using a declarative pipeline, applying arbitrary transformations and enrichments to your
+data along the way. You'd change your synced table to target the final output of your pipeline in this
+scenario. In this way, you can have a full near-real-time pipeline between your raw data and your
+Lakebase serving with minimal overhead.
+
+## Getting Started
+
+<Callout type="note" title="Source">
+    The full example lives in
+    [`data/zerobus_to_lakebase/`](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/data/zerobus_to_lakebase).
+</Callout>
+
+Included is Terraform code (`zerobus-to-lakebase.tf`) for deploying a sample table and service
+principal with appropriate permissions, plus an autoscaling Lakebase project and synced table. You can
+use the script `publish-to-zerobus.py`, which inserts arbitrary data into your table using the
+[Zerobus Python SDK](https://github.com/databricks/zerobus-sdk-py).
