@@ -19,7 +19,7 @@ def cosine(a, b) -> float:
 
 
 def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, limit=25,
-             seed_floor=-1.0):
+             seed_floor=-1.0, authority_boost=1.0):
     """Mirror of graphrag_retrieval.sql.
 
     Args:
@@ -34,7 +34,17 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
         band is model-specific (measured on live Lakebase with databricks-gte-large-en, the
         example graph's similarities span 0.38-0.71, so a floor of 0.3 is a no-op and ~0.55
         is where the distractors drop out).
-    Returns: list of dicts {node_id,node_type,name,nearest_hop,rels,score} desc by score.
+      authority_boost: multiplier applied to a node whose props carry
+        source_method='uc_certified', so a curated definition wins the tie against an
+        equally-relevant inferred one. A multiplier rather than a sort key on purpose:
+        ordering by (authority, score) would let a barely-relevant certified node outrank a
+        highly relevant inferred one. The default 1.0 is an exact no-op — every weight is
+        then 1.0 and the ordering matches the pre-authority behaviour, certified rows
+        present or not — so this is opt-in like seed_floor.
+    Returns: list of dicts {node_id,node_type,name,nearest_hop,rels,score,source_class,
+      authority_score}, ordered by the UNROUNDED authority-weighted score then node_id.
+      `authority_score` is the rounded value for display; ordering deliberately does not use
+      it (see the note in the assemble step).
     """
     # 1) semantic seed — top-k by cosine similarity, above the seed_floor.
     #    `any(emb)` skips a degenerate all-zero embedding: it has no direction, so its
@@ -76,12 +86,49 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
             rels.setdefault(nxt, set()).add(rel)
             frontier.append((nxt, hop + 1, seed_sim, visited + (nxt,)))
 
-    # 3) assemble + rank
+    # 3) assemble + rank, then let source authority break the tie between an
+    #    equally-relevant certified node and an inferred one.
+    #
+    #    Every line below has a counterpart in the SQL; keep them in step. In particular:
+    #      * `is None` rather than `or`, because COALESCE catches only NULL. A node carrying
+    #        {"source_method": ""} must read as "" in BOTH halves, not "" in SQL and
+    #        "inferred" here.
+    #      * `score > 0` guards the boost. seed_similarity is 1 - cosine_distance so it spans
+    #        [-1, 1], and seed_floor's -1.0 default admits negatives; multiplying a negative
+    #        score makes it more negative, demoting the certified node the boost exists to
+    #        promote (-0.10 * 2.0 = -0.20, below an inferred -0.15).
+    #      * a None boost becomes 1.0, matching the SQL where GREATEST ignores NULL.
+    #      * the sort uses the UNROUNDED key; ordering by the rounded output would collapse
+    #        scores differing beyond 4 dp into ties (0.175024 / 0.175006 -> 0.1750) and let
+    #        the tiebreak reorder them, which is not a no-op.
+    # Clamped to >= 1.0, mirroring GREATEST(:authority_boost, 1.0) in the SQL. `score > 0`
+    # below stops a NEGATIVE score being made worse; this stops a boost BELOW 1.0 doing the
+    # same thing to a positive one. Together they guarantee a boost can never rank a certified
+    # node lower than it would have sat unboosted, whatever the caller passes.
+    # NaN needs its own arm: max(nan, 1.0) is nan, so it slips past the clamp, and the two
+    # halves then disagree in OPPOSITE directions — Python sorts nan low (demoting the node)
+    # while Postgres numeric NaN sorts greater than everything (promoting it to rank 1). NaN is
+    # reachable whenever a caller derives the boost from a score ratio. `x != x` is the portable
+    # NaN test.
+    # Converted, then clamped. float() honours an int, a Decimal or a numeric string; what
+    # collapses to 1.0 (no boost) is None, NaN, +/-Infinity, and anything float() cannot
+    # represent -- a Decimal("sNaN") or an int wider than a float, both of which make
+    # math.isfinite raise rather than return False. +Infinity cannot be honoured: it is not
+    # JSON-serializable and it pins the row regardless of relevance.
+    try:
+        _b = 1.0 if authority_boost is None else float(authority_boost)
+        boost = max(_b, 1.0) if math.isfinite(_b) else 1.0
+    except (TypeError, ValueError, OverflowError):
+        boost = 1.0
     out = []
     for nid, score in best.items():
         if nid not in nodes:
             continue
         n = nodes[nid]
+        raw = (n.get("props") or {}).get("source_method")
+        source_class = "inferred" if raw is None else raw
+        weight = boost if (source_class == "uc_certified" and score > 0) else 1.0
+        rank_key = score * weight
         out.append({
             "node_id": nid,
             "node_type": n["node_type"],
@@ -89,6 +136,15 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
             "nearest_hop": nearest[nid],
             "rels": sorted(rels.get(nid, [])),
             "score": round(score, 4),
+            "source_class": source_class,
+            "authority_score": round(rank_key, 4),
+            "_rank_key": rank_key,
         })
-    out.sort(key=lambda r: r["score"], reverse=True)
+    # Tie broken on node_id for determinism; a boost makes exact ties likelier than the raw
+    # scores did. NOTE Postgres orders TEXT by database collation while this compares Unicode
+    # codepoints, so the halves agree only under C collation — matters for ids differing in
+    # case or punctuation.
+    out.sort(key=lambda r: (-r["_rank_key"], r["node_id"]))
+    for r in out:
+        del r["_rank_key"]
     return out[:limit]

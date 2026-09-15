@@ -92,13 +92,27 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   arrives via graph expansion). Cosine ranges
   `[-1, 1]`, so `-1.0` keeps all seeds (identical to no floor). **`:seed_floor` is a required
   bind** — Postgres has no server-side default for a named parameter, so existing callers of the
-  SQL must pass it even to keep the old behavior (bind `-1.0`); omitting it raises
-  `bind message supplies 2 parameters, but prepared statement requires 3`. The Python twin
+  SQL must pass it even to keep the old behavior (bind `-1.0`); omitting a required bind raises a
+  `bind message supplies N parameters, but prepared statement requires N+1` error. The exact
+  numbers depend on the driver, since `:query_embedding` appears three times and drivers differ
+  on whether repeated names collapse to one bind. The Python twin
   defaults it to `-1.0`, so Python callers need no change. **Watch the empty-seed case:** a floor
   above every node's similarity empties the seed CTE and the query returns *zero* rows — detect
   that in your caller and either retry at `-1.0` or decline to answer, rather than synthesizing
   from no context. See `:seed_floor` in
   [`sql/graphrag_retrieval.sql`](sql/graphrag_retrieval.sql).
+- **`:authority_boost` is a required bind, exactly like `:seed_floor`.** Adding it changes the SQL's
+  parameter arity, so an existing caller that does not pass it raises
+  `bind message supplies 4 parameters, but prepared statement requires 5` — the ranking is
+  backward-compatible, the *bind signature* is not. Bind `1.0` to keep the previous behaviour
+  exactly. The Python twin defaults it to `1.0`, so Python callers need no change. Values below
+  `1.0` are clamped up to `1.0` in both halves, because a fractional or negative multiplier would
+  demote the certified node the boost exists to promote. **A non-finite or absent boost means "no
+  boost":** NaN, +/-Infinity and NULL all resolve to `1.0` on both halves rather than erroring,
+  since a boost derived from a score ratio can reach any of them; a Decimal or numeric string is
+  honoured normally. Calibrate it once a certified core actually
+  exists — start around `1.2`-`2.0` and check against your own graph, since the useful value depends
+  on the score gaps your embedding model produces, not on a portable constant.
 - **Keep a minimum Lakebase compute above zero for latency-sensitive serving.** After scale-to-zero,
   the first query pays a cold-start penalty of several× the warm latency while index pages load in
   (measured on a live instance at ~6× on a small graph; scale-dependent).
@@ -125,6 +139,78 @@ Undirected relations (`SUBSTITUTE_FOR`) are stored once with sorted endpoints an
 at query time by the retrieval SQL, so the view emits **both directions** for them — a directed
 consumer would otherwise miss the reverse. De-duplicate symmetric predicates on ingest.
 It's a column contract, not a dependency. See [`sql/gold_triplets_mapping.sql`](sql/gold_triplets_mapping.sql).
+
+## Authority: a certified core over the inferred graph
+
+Retrieval so far ranks by **relevance** only — semantic seed similarity decayed by hop distance. That
+cannot tell a triplet inferred from a document apart from a definition somebody curated on purpose,
+which is the question that actually gets asked of a governed context layer: *is this the authoritative
+definition, and where did it come from?*
+
+A node marked as certified carries it in `props`, the same place edges already carry provenance:
+
+```json
+{"source_method": "uc_certified"}
+```
+
+Retrieval then multiplies that node's score by `:authority_boost` and returns two extra columns:
+`source_class` (`uc_certified` / `inferred`) so an answer can cite what resolved it, and
+`authority_score`, the rounded weighted value. Note the ordering uses the UNROUNDED
+weighted score, not this column — see the caveats below before re-sorting client-side on it.
+
+**A multiplier, not a sort key.** Ordering by `(authority, score)` would let a barely-relevant
+certified node outrank a highly relevant inferred one — worse than having no authority signal at all.
+Multiplying keeps relevance meaningful and makes the strength one tunable knob. The smoke test pins
+both directions: a sufficient boost *does* promote a certified node to rank 1, and a modest boost
+*does not* let the least relevant certified node reach rank 1. A sort-key implementation passes the
+first and fails the second. Both halves are covered, including the negative-score and
+below-1.0-boost guards. Note the SQL side is exercised as a **hand transcription** of the assemble
+stage against its own fixture, not by running `sql/graphrag_retrieval.sql` itself — nothing ties the
+two together, so a change to the query must be mirrored in the test by hand. Only a live Lakebase run
+exercises the real file.
+
+**`:authority_boost` defaults to 1.0, which leaves every weight at 1.0.** Scores are then unchanged
+and distinctly-scored rows keep their relative order. It is **not** a byte-identical no-op, though,
+and the difference is not hypothetical — measured live against a 1219-node graph, two pairs in the
+top ten were exact score ties (`0.2945` and `0.1473`), and they now order deterministically by
+`node_id` where the previous query left tied rows in whatever order Postgres returned. That is a
+deliberate improvement over an unstable sort, but it is a change. Three further caveats:
+
+- The ranking orders by the **unrounded** product. Ordering by the rounded `authority_score` column
+  would collapse scores that differ beyond 4 dp into ties — `0.175024` and `0.175006` both round to
+  `0.1750` — and let the tiebreak reorder them, which is *not* a no-op. The rounded value is output
+  only.
+- The `node_id` tiebreak orders `TEXT` by **database collation** in Postgres and by Unicode codepoints
+  in the Python twin, so the two agree only under `C` collation. It matters only for ids differing in
+  case or punctuation.
+- The query reads `n.props`, so `graph.nodes` must have that column. It is in
+  [`sql/schema.sql`](sql/schema.sql), but a graph built by an older or bespoke script may lack it —
+  one such graph turned up during live testing. The query then fails with
+  `column n.props does not exist` on *every* retrieval, not just certified rows. This is pre-existing
+  (the previous query also selected `n.props`), and the fix is one statement:
+  `ALTER TABLE graph.nodes ADD COLUMN IF NOT EXISTS props JSONB NOT NULL DEFAULT '{}'::jsonb`.
+
+**Only positive scores are boosted, and that guard is load-bearing.** `seed_similarity` is
+`1 - cosine_distance`, so it spans `[-1, 1]`, and the default `seed_floor = -1.0` admits
+negative-similarity seeds by design. Multiplying a negative score makes it *more* negative: a
+certified node at `-0.10` with a boost of `2.0` becomes `-0.20` and sorts **below** an inferred node
+at `-0.15`, so the boost would demote exactly what it exists to promote, and get worse as you raise
+the knob. Boosting only above zero keeps the transform monotone. The smoke test pins this in both
+halves.
+
+**`source_class` is passed through verbatim, not normalised to two values.** It is whatever
+`n.props ->> 'source_method'` holds, defaulting to `inferred` only when the key is absent, so any
+producer's own label survives. In practice today you will see only `uc_certified` or `inferred`,
+because nothing in this repo writes `source_method` into **node** props yet — the `structured` and
+`llm_enrichment` values in [`sql/gold_triplets_mapping.sql`](sql/gold_triplets_mapping.sql) are
+**edge** provenance (`e.props`), a different table. The pass-through is future-proofing rather than a
+current collision. Only `uc_certified` is boosted; every other value carries weight `1.0`.
+**Branch on `== 'uc_certified'`, never on `!= 'inferred'`.**
+
+**Where certified nodes come from is deliberately not this example's business.** Anything that can
+write the `props` key participates — a Unity Catalog semantics exporter, a curation UI, a hand-written
+insert. That keeps the ranking seam independent of any one producer's availability, and it is why this
+half carries no new prerequisite beyond what the example already needs.
 
 ## Layout
 
@@ -155,7 +241,11 @@ cd agents/graphrag
 uv run --python 3.11 --with duckdb --with numpy smoketest/graphrag_logic_smoketest.py
 ```
 
-82 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
+134 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
+authority ranking (certified-over-inferred, the positive-score and below-1.0 clamps, NaN /
++Infinity / None boosts asserted on BOTH halves, odd bind types — Decimal, an int wider than a
+float, a string — reaching neither an exception nor a non-finite score, unrounded ordering,
+verbatim `source_class`),
 dangling-edge guard, blended-score ranking, depth bound, and the `seed_floor` distractor guard.
 
 ## Deploy (Asset Bundle)

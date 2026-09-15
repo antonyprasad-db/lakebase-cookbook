@@ -124,19 +124,60 @@ print("Complete the cell above to apply sql/schema.sql and INSERT the graph.")
 # MAGIC ## 4. Query — hybrid GraphRAG retrieval — ✍️ COMPLETE THIS
 # MAGIC Once the graph is loaded (step 3), run `sql/graphrag_retrieval.sql` against the same
 # MAGIC Lakebase connection: pgvector cosine seed -> recursive-CTE k-hop expansion. Bind
-# MAGIC `:query_embedding` (embed the user question), `:seed_k`, `:max_hops`, `:seed_floor`
-# MAGIC (min cosine a seed must clear; `-1.0` = keep all, same as before — raise toward
+# MAGIC `:query_embedding` (embed the user question), `:seed_k`, `:max_hops`, `:seed_floor`,
+# MAGIC (`:seed_floor` is the min cosine a seed must clear; `-1.0` = keep all, same as before —
+# MAGIC raise toward
 # MAGIC a floor calibrated to your model's similarity range — ~`0.55` for
-# MAGIC `databricks-gte-large-en` on this graph). To validate the logic *without* Lakebase,
-# MAGIC run `smoketest/graphrag_logic_smoketest.py`.
+# MAGIC `databricks-gte-large-en` on this graph). `:authority_boost` of `1.0` keeps the
+# MAGIC pre-authority ranking; all five binds are required. To validate the logic
+# MAGIC *without* Lakebase, run `smoketest/graphrag_logic_smoketest.py`.
 
 # COMMAND ----------
 
 question = "Which suppliers can cover skim milk demand surging in the Northeast?"
 q_emb = embed([question])[0]
 print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
-      "sql/graphrag_retrieval.sql with :seed_k, :max_hops, and :seed_floor (-1.0 = keep all), "
+      "sql/graphrag_retrieval.sql with :seed_k, :max_hops, :seed_floor (-1.0 = keep all) and "
+      ":authority_boost (1.0 = rank as before), "
       f"execute against Lakebase, then pass the ranked context to: {CHAT_ENDPOINT}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4b. See authority ranking work — ✍️ OPTIONAL
+# MAGIC `:authority_boost` does nothing until some node is marked as curated, and this example
+# MAGIC deliberately ships no producer for that — anything that can write the `props` key
+# MAGIC participates, which keeps the ranking independent of where curation comes from.
+# MAGIC
+# MAGIC To watch it work end to end without wiring a producer, mark one node by hand and re-run
+# MAGIC the query twice. Pick a node the query already returns but *not* the top hit, so the
+# MAGIC promotion is visible:
+# MAGIC
+# MAGIC ```sql
+# MAGIC -- mark one node as curated (any producer would write this same key)
+# MAGIC UPDATE graph.nodes
+# MAGIC    SET props = props || '{"source_method": "uc_certified"}'::jsonb
+# MAGIC  WHERE node_id = 'supplier:S3';
+# MAGIC ```
+# MAGIC
+# MAGIC Now run the retrieval twice, changing only the one bind:
+# MAGIC
+# MAGIC - `:authority_boost = 1.0` — ranking is unchanged from before, and `supplier:S3` now
+# MAGIC   reports `source_class = 'uc_certified'` so an answer can cite it.
+# MAGIC - `:authority_boost = 2.0` — `supplier:S3` moves up, because its relevance score is
+# MAGIC   multiplied while everything else keeps weight `1.0`.
+# MAGIC
+# MAGIC What to look for, because it is the point of the design: a **modest** boost does not hand
+# MAGIC rank 1 to a weakly-related certified node. Mark `category:dairy` instead — it is in this
+# MAGIC graph but further from the question — and at `1.2` the on-topic nodes stay above it, because
+# MAGIC relevance still dominates and authority only breaks near-ties. Be precise about the limit
+# MAGIC though: the boost is an unbounded multiplier with only a lower clamp, so a *large* enough
+# MAGIC value will promote any positively-scored certified node to rank 1. That is a calibration
+# MAGIC choice, not a guarantee the query makes. Undo with:
+# MAGIC
+# MAGIC ```sql
+# MAGIC UPDATE graph.nodes SET props = props - 'source_method' WHERE node_id = 'supplier:S3';
+# MAGIC ```
 
 # COMMAND ----------
 
