@@ -57,6 +57,10 @@ def retrieve(
       `authority_score` is the rounded value for display; ordering deliberately does not use
       it (see the note in the assemble step).
     """
+    # Same coercion the SQL's ::float8 cast applies, so a numeric string works in both halves
+    # and a NaN floor admits no seed in either. None still raises TypeError here.
+    seed_floor = float(seed_floor)
+
     # 1) semantic seed — top-k by cosine similarity, above the seed_floor.
     #    `any(emb)` skips a degenerate all-zero embedding: it has no direction, so its
     #    similarity is undefined. The SQL twin excludes the same case by comparing on

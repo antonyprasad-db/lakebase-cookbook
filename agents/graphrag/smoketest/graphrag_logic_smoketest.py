@@ -1088,6 +1088,7 @@ def main() -> int:
     placeholders = set(re.findall(r"%\((\w+)\)s", sql))
     check("sql: placeholders are exactly the five binds", placeholders, binds)
     check("sql: no stray percent sign", re.findall(r"%(?![(%])", sql.replace("%%", "")), [])
+    check("sql: every %( is a complete %(name)s", re.findall(r"%\((?!\w+\)s)", sql), [])
     colon_bind = r"(?<![:\w]):(?:" + "|".join(sorted(binds)) + r")\b"
     check("sql: no :name binds left", re.findall(colon_bind, sql), [])
 

@@ -6,9 +6,11 @@
 -- to synthesize an answer from.
 --
 -- Run it with psycopg 3, the example's declared driver: cur.execute(sql, params), where
--- params is a dict with the five keys below. Each bind is cast where it is used, so
--- query_embedding may be a Python list of floats or a pgvector literal such as
--- '[0.12,-0.03,...]', and seed_floor / authority_boost may be any number or numeric string.
+-- params is a dict with the five keys below. query_embedding, seed_floor and authority_boost
+-- are cast where they are used, so the embedding may be a list of Python floats (not a numpy
+-- array, nor a list mixing ints and floats: call .tolist() or map float) or a pgvector literal
+-- such as '[0.12,-0.03,...]', and seed_floor / authority_boost may be any number or numeric
+-- string. seed_k and max_hops are plain integers.
 -- Results are capped by the fixed LIMIT 25 at the end. There is no limit bind: the Python
 -- twin's limit argument has no SQL counterpart, and psycopg ignores extra dict keys.
 --
@@ -30,18 +32,21 @@
 --                                         missing: seed_floor" before the query is sent.
 --                                         Calibrate it to your embedding model's observed range,
 --                                         not to a fixed constant (see README).
---   authority_boost      NUMERIC       -- multiplier for a node whose props carry
+--   authority_boost      FLOAT         -- multiplier for a node whose props carry
 --                                         source_method='uc_certified', so a curated definition wins
 --                                         the tie against an equally-relevant inferred one. Bind 1.0
 --                                         to rank exactly as before. REQUIRED BIND, same reason as
 --                                         seed_floor. Values below 1.0 are clamped up to 1.0 (see the
 --                                         assemble stage) because a fractional or negative
 --                                         multiplier would DEMOTE the certified node it is meant to
---                                         promote.
+--                                         promote. A value outside double-precision range fails the
+--                                         query ("out of range for type double precision"), where the
+--                                         Python twin falls back to no boost.
 --
 -- Empty-seed caveat: if the floor exceeds every node's similarity, the seed CTE is
--- empty and this statement returns ZERO rows (a NULL seed_floor does the same, where the
--- Python twin raises TypeError). Have the caller detect that and either
+-- empty and this statement returns ZERO rows. A NaN seed_floor does the same, as in the
+-- Python twin; so does a NULL one, where the twin raises TypeError. Have the caller detect
+-- that and either
 -- retry at -1.0 or decline to answer — never synthesize from empty context.
 --
 -- Distance: cosine. pgvector '<=>' returns cosine DISTANCE (0=identical),
@@ -61,8 +66,11 @@ seed AS (
     -- pgvector returns for a zero-norm embedding. NaN compares GREATER than every
     -- float in Postgres, so a similarity form (`1 - dist >= seed_floor`) admits
     -- such a row at any floor; NaN then propagates through the score and sorts
-    -- FIRST under ORDER BY ... DESC, putting a garbage node at rank 1.
+    -- FIRST under ORDER BY ... DESC, putting a garbage node at rank 1. For the same reason a
+    -- NaN floor would make the bound NaN and admit every row, so the second test makes a NaN
+    -- floor admit none, as the Python twin's `sim >= nan` does.
     WHERE (e.embedding <=> %(query_embedding)s::vector) <= (1 - %(seed_floor)s::float8)
+      AND %(seed_floor)s::float8 <> 'NaN'::float8
     ORDER BY e.embedding <=> %(query_embedding)s::vector  -- HNSW ANN scan
     LIMIT %(seed_k)s
 ),
@@ -178,19 +186,18 @@ FROM (
         -- certified 1.00 vs inferred 0.90 at boost 0.5 ranks the inferred node first, and at
         -- -2.0 the certified node lands at -2.00. Clamping means a boost can never rank a
         -- certified node below where it would have sat unboosted, whatever is bound.
-        -- Non-finite guard. GREATEST(NaN, 1.0) is NaN and numeric NaN sorts above every
+        -- Non-finite guard. GREATEST(NaN, 1.0) is NaN and NaN sorts above every
         -- non-NaN value, so without this a NaN bind puts an arbitrary certified row at rank 1;
         -- +Infinity survives the clamp and serializes as the non-JSON token Infinity. Both must
-        -- be NAMED: `x <> x` does not detect NaN here (measured on Lakebase 16.15,
-        -- 'NaN'::numeric <> 'NaN'::numeric is false). -Infinity and NULL need no arm, GREATEST
-        -- already yields 1.0 (also measured). The bind is cast to numeric so these checks and the
-        -- clamp run in numeric whatever type the driver sends (psycopg sends a Python float as
-        -- double precision). Needs PG 14, which added numeric Infinity.
+        -- be NAMED: `x <> x` does not detect NaN here, because Postgres treats NaN as equal to
+        -- itself (measured on Lakebase 16.15). -Infinity and NULL need no arm, GREATEST already
+        -- yields 1.0 (also measured). The bind is cast to double precision, matching the Python
+        -- twin's float(), so a Decimal or numeric string ranks exactly as the same float would.
         s.graph_score *
             CASE WHEN n.props ->> 'source_method' = 'uc_certified' AND s.graph_score > 0
-                 THEN CASE WHEN %(authority_boost)s::numeric = 'NaN'::numeric
-                                OR %(authority_boost)s::numeric = 'Infinity'::numeric THEN 1.0
-                           ELSE GREATEST(%(authority_boost)s::numeric, 1.0) END
+                 THEN CASE WHEN %(authority_boost)s::float8 = 'NaN'::float8
+                                OR %(authority_boost)s::float8 = 'Infinity'::float8 THEN 1.0
+                           ELSE GREATEST(%(authority_boost)s::float8, 1.0) END
                  ELSE 1.0 END                                        AS authority_rank_key
     FROM scored s
     JOIN graph.nodes n ON n.node_id = s.node_id

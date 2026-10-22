@@ -246,7 +246,7 @@ nobody asks a question using `total_revenue`.
 Both `data_type` and `full_data_type` report a measure as plain `bigint`; only DESCRIBE marks it,
 by suffixing the type with ` measure`. Since measure-versus-dimension *is* the semantic layer,
 DESCRIBE is not optional. It is this module's one brittle coupling, so it is isolated in
-`parse_describe()` and pinned against verbatim live output.
+`parse_describe()` and pinned against captured live output.
 
 `Owner` and `Created Time` are carried onto the view node. Retrieval does not consult them today,
 but they are the raw material for a richer authority function than "certified or not".
@@ -322,12 +322,15 @@ cd agents/graphrag
 uv run --python 3.11 --with duckdb --with numpy smoketest/graphrag_logic_smoketest.py
 ```
 
-134 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
+138 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
 authority ranking (certified-over-inferred, the positive-score and below-1.0 clamps, NaN /
 +Infinity / None boosts asserted on BOTH halves, odd bind types — Decimal, an int wider than a
-float, a string — reaching neither an exception nor a non-finite score, unrounded ordering,
+float, a string — reaching neither an exception nor a non-finite score in the Python twin (in
+SQL a boost beyond double-precision range fails the query), unrounded ordering,
 verbatim `source_class`),
-dangling-edge guard, blended-score ranking, depth bound, and the `seed_floor` distractor guard.
+dangling-edge guard, blended-score ranking, depth bound, the `seed_floor` distractor guard, and
+the retrieval SQL's bind contract (exactly the five psycopg placeholders, none malformed, no stray
+`%`, no leftover `:name`).
 
 The certified-core builder has its own suite, which needs no warehouse — the `SqlReader` protocol
 lets a fake replay recorded output:
@@ -336,7 +339,7 @@ lets a fake replay recorded output:
 uv run --python 3.11 smoketest/certified_core_smoketest.py
 ```
 
-Its `DESCRIBE` fixture is verbatim live output, because parsing `DESCRIBE` is the module's one
+Its `DESCRIBE` fixture is captured live output (identifying values replaced), because parsing `DESCRIBE` is the module's one
 brittle coupling and inventing its shape would prove nothing. It covers measure-vs-dimension
 detection, a field named `# Orders` (which must not be mistaken for the metadata boundary),
 3-column and 2-column `DESCRIBE` rows, malformed metadata JSON, and rejection of catalog names

@@ -1,14 +1,14 @@
 """Offline checks for graph_certified.py — no warehouse, no Lakebase, no model endpoint.
 
-The DESCRIBE fixture below is VERBATIM output from a live Unity Catalog metric view
-(demo_catalog.metric_view_lab.order_details_metric_view), trimmed in field count but not in
-shape: same four columns, same ' measure' type suffix, same spacer row, same
+The DESCRIBE fixture below was captured from a live Unity Catalog metric view, with its
+identifying values (catalog, owner) replaced by placeholders, and trimmed in field count but not
+in shape: same four columns, same ' measure' type suffix, same spacer row, same
 '# Detailed Table Information' boundary, same metadata JSON. Parsing DESCRIBE is the one brittle
 coupling in the module, so its SHAPE is pinned against real output rather than invented.
 
 Two rows ARE synthetic and marked as such: `broken_meta` (metadata that is not JSON) and the
 hostile inputs below. No live DESCRIBE emits '{not json'; that row exists to pin the degradation
-path, and calling the whole fixture verbatim would overstate it.
+path.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def check(name: str, got, want) -> None:
         FAILURES.append(name)
 
 
-# --- verbatim DESCRIBE EXTENDED shape (4 columns) --------------------------------------------
+# --- live DESCRIBE EXTENDED shape (4 columns) --------------------------------------------
 DESCRIBE_ROWS = [
     [
         "order_ID",
@@ -567,7 +567,7 @@ def main() -> int:
     print("\n== TEST 2: discovery filters Genie/Lakeview internals ==")
     check(
         "internal prefix is recognised",
-        is_internal_catalog("__databricks_internal_catalog_lakeview_1444828305810485"),
+        is_internal_catalog("__databricks_internal_catalog_lakeview_1234567890123456"),
         True,
     )
     check("a user catalog is not internal", is_internal_catalog("demo_catalog"), False)
