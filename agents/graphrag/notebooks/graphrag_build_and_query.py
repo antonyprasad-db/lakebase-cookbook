@@ -167,7 +167,7 @@ print(
 # MAGIC This assumes you built the graph directly from `sql/schema.sql`, the path this notebook
 # MAGIC follows, so `graph.nodes` is a plain table. The step does not apply if you serve
 # MAGIC `graph.nodes` as a Lakebase synced table from Unity Catalog: that copy is read-only (reads,
-# MAGIC indexes and `DROP TABLE` only, and a write breaks the sync).
+# MAGIC indexes and `DROP TABLE` only).
 # MAGIC
 # MAGIC Now run the retrieval twice, changing only the one bind:
 # MAGIC

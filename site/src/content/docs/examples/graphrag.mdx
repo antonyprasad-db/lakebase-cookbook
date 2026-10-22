@@ -71,7 +71,7 @@ a directed consumer would otherwise miss the reverse.
 
 ## How retrieval works
 
-The [retrieval SQL](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/sql/graphrag_retrieval.sql) is three stages in one statement. Run it with psycopg 3, `cur.execute(sql, params)`, where
+The [retrieval SQL](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/sql/graphrag_retrieval.sql) is four stages in one statement. Run it with psycopg 3, `cur.execute(sql, params)`, where
 `params` holds the five binds `query_embedding`, `seed_k`, `max_hops`, `seed_floor` and
 `authority_boost`:
 

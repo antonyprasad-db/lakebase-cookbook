@@ -111,8 +111,8 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   demote the certified node the boost exists to promote. **A non-finite or absent boost means "no
   boost":** NaN, +/-Infinity and NULL all resolve to `1.0` on both halves rather than erroring,
   since a boost derived from a score ratio can reach any of them; a Decimal or numeric string is
-  honoured normally. One SQL-only limit: a boost beyond double-precision range (for example
-  `10**400`) fails the query, where the twin falls back to `1.0`. Calibrate it once a certified core actually
+  honoured normally. In SQL, a boost that does not cast to a double (a bool, a non-numeric string,
+  or a value outside double range such as `10**400`) fails the query, where the twin uses `1.0`. Calibrate it once a certified core actually
   exists — start around `1.2`-`2.0` and check against your own graph, since the useful value depends
   on the score gaps your embedding model produces, not on a portable constant.
 - **Keep a minimum Lakebase compute above zero for latency-sensitive serving.** After scale-to-zero,

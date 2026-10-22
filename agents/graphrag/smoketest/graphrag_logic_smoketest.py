@@ -1097,8 +1097,14 @@ def main() -> int:
     casts = {"query_embedding": "::vector", "seed_floor": "::float8", "authority_boost": "::float8"}
     used = set(re.findall(r"%\((\w+)\)s(::\w+)?", code))
     check("sql: every use of a bind carries its cast", used, {(b, casts.get(b, "")) for b in binds})
-    nan_guard = "%(seed_floor)s::float8 <> 'NaN'::float8"
-    check("sql: the seed CTE rejects a NaN seed_floor", nan_guard in code.split("adj AS")[0], True)
+    # The whole seed predicate, whitespace-normalised, so an AND flipped to OR or a reversed
+    # comparison fails here too. Only running the file against Postgres would pin the rest.
+    seed_where = (
+        "WHERE (e.embedding <=> %(query_embedding)s::vector) <= (1 - %(seed_floor)s::float8)"
+        " AND %(seed_floor)s::float8 <> 'NaN'::float8"
+    )
+    seed_cte = " ".join(code.split("adj AS")[0].split())
+    check("sql: the seed floor predicate and NaN guard are intact", seed_where in seed_cte, True)
 
     # the twin's side of the same contract: a numeric string floor, and a NaN floor. Caught, not
     # called bare, so a regression reports one FAIL instead of aborting the run.
