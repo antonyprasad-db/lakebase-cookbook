@@ -5,34 +5,37 @@
 -- pure vector search would miss. Returns a ranked context set for the agent
 -- to synthesize an answer from.
 --
+-- Run it with psycopg 3, the example's declared driver: cur.execute(sql, params) with a
+-- dict keyed by the names below. Pass query_embedding as a pgvector text literal such as
+-- '[0.12,-0.03,...]'; a Python list arrives as double precision[] and fails with
+-- "operator does not exist: vector <=> double precision[]".
+--
 -- Parameters (bind at call time from the agent):
---   :query_embedding  VECTOR(1024)  -- embedding of the user question (from your embeddings endpoint)
---   :seed_k           INT           -- how many semantic seed nodes (e.g. 5)
---   :max_hops         INT           -- traversal depth bound (e.g. 2)
---   :seed_floor       FLOAT         -- min cosine similarity a seed must clear. Cosine ranges
---                                      [-1, 1], so -1.0 keeps ALL seeds (same as no floor).
---                                      Raise it to guard against distractor
---                                      pollution: under heavy off-topic content, weak seeds
---                                      drag unrelated subgraphs in and dilute the ranking.
---                                      REQUIRED BIND: Postgres has no server-side default for a
---                                      named parameter, so you must pass this even to keep the
---                                      old behavior — bind -1.0 for "no floor". Omitting it
---                                      raises a "bind message supplies N parameters, but prepared
---                                      statement requires N+1" error. With :authority_boost added
---                                      there are now FIVE binds, so omitting one reports 4 vs 5.
---                                      Calibrate it to your embedding model's observed range,
---                                      not to a fixed constant (see README).
---   :authority_boost  NUMERIC       -- multiplier for a node whose props carry
---                                      source_method='uc_certified', so a curated definition wins
---                                      the tie against an equally-relevant inferred one. Bind 1.0
---                                      to rank exactly as before. REQUIRED BIND, same reason as
---                                      :seed_floor. Bind it as NUMERIC, not text: the CASE's
---                                      GREATEST resolves the type first, so a text bind fails at
---                                      plan time with "GREATEST types text and numeric cannot be
---                                      matched". Values below 1.0 are clamped up to 1.0 (see the
---                                      assemble stage) because a fractional or negative
---                                      multiplier would DEMOTE the certified node it is meant to
---                                      promote.
+--   %(query_embedding)s  VECTOR(1024)  -- embedding of the user question (from your embeddings endpoint)
+--   %(seed_k)s           INT           -- how many semantic seed nodes (e.g. 5)
+--   %(max_hops)s         INT           -- traversal depth bound (e.g. 2)
+--   %(seed_floor)s       FLOAT         -- min cosine similarity a seed must clear. Cosine ranges
+--                                         [-1, 1], so -1.0 keeps ALL seeds (same as no floor).
+--                                         Raise it to guard against distractor
+--                                         pollution: under heavy off-topic content, weak seeds
+--                                         drag unrelated subgraphs in and dilute the ranking.
+--                                         REQUIRED BIND: a named parameter has no default, so you must
+--                                         pass this even to keep the old behavior — bind -1.0 for "no
+--                                         floor". With psycopg, omitting it raises "query parameter
+--                                         missing: seed_floor" before the query is sent.
+--                                         Calibrate it to your embedding model's observed range,
+--                                         not to a fixed constant (see README).
+--   %(authority_boost)s  NUMERIC       -- multiplier for a node whose props carry
+--                                         source_method='uc_certified', so a curated definition wins
+--                                         the tie against an equally-relevant inferred one. Bind 1.0
+--                                         to rank exactly as before. REQUIRED BIND, same reason as
+--                                         %(seed_floor)s. Bind it as NUMERIC, not text: the CASE's
+--                                         GREATEST resolves the type first, so a text bind fails at
+--                                         plan time with "GREATEST types text and numeric cannot be
+--                                         matched". Values below 1.0 are clamped up to 1.0 (see the
+--                                         assemble stage) because a fractional or negative
+--                                         multiplier would DEMOTE the certified node it is meant to
+--                                         promote.
 --
 -- Empty-seed caveat: if the floor exceeds every node's similarity, the seed CTE is
 -- empty and this statement returns ZERO rows. Have the caller detect that and either
@@ -47,18 +50,18 @@ WITH RECURSIVE
 seed AS (
     SELECT
         e.node_id,
-        1 - (e.embedding <=> :query_embedding) AS similarity
+        1 - (e.embedding <=> %(query_embedding)s) AS similarity
     FROM graph.node_embeddings e
     -- Drop weak seeds (distractor guard; -1.0 = keep all). Expressed on cosine
     -- DISTANCE rather than similarity — equivalent for real vectors
     -- (sim >= floor  <=>  dist <= 1 - floor) but it also excludes NaN, which
     -- pgvector returns for a zero-norm embedding. NaN compares GREATER than every
-    -- float in Postgres, so a similarity form (`1 - dist >= :seed_floor`) admits
+    -- float in Postgres, so a similarity form (`1 - dist >= %(seed_floor)s`) admits
     -- such a row at any floor; NaN then propagates through the score and sorts
     -- FIRST under ORDER BY ... DESC, putting a garbage node at rank 1.
-    WHERE (e.embedding <=> :query_embedding) <= (1 - :seed_floor)
-    ORDER BY e.embedding <=> :query_embedding      -- HNSW ANN scan
-    LIMIT :seed_k
+    WHERE (e.embedding <=> %(query_embedding)s) <= (1 - %(seed_floor)s)
+    ORDER BY e.embedding <=> %(query_embedding)s      -- HNSW ANN scan
+    LIMIT %(seed_k)s
 ),
 
 -- Undirected adjacency: every edge is walkable in both directions so that
@@ -73,7 +76,7 @@ adj AS (
     SELECT dst_id AS from_id, src_id AS next_id, rel FROM graph.edges
 ),
 
--- 2) GRAPH EXPANSION — walk edges out from each seed up to :max_hops.
+-- 2) GRAPH EXPANSION — walk edges out from each seed up to %(max_hops)s.
 --    Track depth to bound the walk and a per-path visited list to stop cycles.
 walk AS (
     -- base: the seeds themselves at hop 0, carrying their semantic score
@@ -98,7 +101,7 @@ walk AS (
         adj.rel                                AS via_rel
     FROM walk w
     JOIN adj ON adj.from_id = w.node_id
-    WHERE w.hop < :max_hops
+    WHERE w.hop < %(max_hops)s
       AND NOT (adj.next_id = ANY(w.visited))   -- per-path cycle guard (dedup happens in `scored`)
 ),
 
@@ -130,7 +133,7 @@ scored AS (
 --    an inferred node at -0.15 — the boost would demote exactly what it exists to promote,
 --    and worsen as the knob is raised. Boosting only above zero keeps the transform monotone.
 --
---    `:authority_boost` defaults to 1.0, which leaves the weight at 1.0 for every row and the
+--    `%(authority_boost)s` defaults to 1.0, which leaves the weight at 1.0 for every row and the
 --    ordering identical to the pre-authority behaviour, certified rows present or not. Note
 --    the ORDER BY uses the UNROUNDED product on purpose: ordering by the rounded output
 --    column would collapse scores that differ beyond 4 dp into ties (0.175024 and 0.175006
@@ -138,7 +141,7 @@ scored AS (
 --
 --    A NULL bind needs no COALESCE: Postgres GREATEST ignores NULL inputs and returns NULL only
 --    if EVERY argument is NULL, so GREATEST(NULL, 1.0) is 1.0. That means a NULL
---    :authority_boost already degrades to "no boost" rather than making the score NULL (which
+--    %(authority_boost)s already degrades to "no boost" rather than making the score NULL (which
 --    would sort FIRST under ORDER BY ... DESC and hand rank 1 to a garbage row). An earlier
 --    revision wrapped this in COALESCE for that reason; the clamp made it dead code.
 SELECT
@@ -181,9 +184,9 @@ FROM (
         -- type, so the parameter is never cast. Needs PG 14, which added numeric Infinity.
         s.graph_score *
             CASE WHEN n.props ->> 'source_method' = 'uc_certified' AND s.graph_score > 0
-                 THEN CASE WHEN :authority_boost = 'NaN'::numeric
-                                OR :authority_boost = 'Infinity'::numeric THEN 1.0
-                           ELSE GREATEST(:authority_boost, 1.0) END
+                 THEN CASE WHEN %(authority_boost)s = 'NaN'::numeric
+                                OR %(authority_boost)s = 'Infinity'::numeric THEN 1.0
+                           ELSE GREATEST(%(authority_boost)s, 1.0) END
                  ELSE 1.0 END                                        AS authority_rank_key
     FROM scored s
     JOIN graph.nodes n ON n.node_id = s.node_id

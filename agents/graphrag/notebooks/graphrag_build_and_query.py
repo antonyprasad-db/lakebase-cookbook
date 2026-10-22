@@ -123,12 +123,13 @@ print("Complete the cell above to apply sql/schema.sql and INSERT the graph.")
 # MAGIC %md
 # MAGIC ## 4. Query — hybrid GraphRAG retrieval — ✍️ COMPLETE THIS
 # MAGIC Once the graph is loaded (step 3), run `sql/graphrag_retrieval.sql` against the same
-# MAGIC Lakebase connection: pgvector cosine seed -> recursive-CTE k-hop expansion. Bind
-# MAGIC `:query_embedding` (embed the user question), `:seed_k`, `:max_hops`, `:seed_floor`,
-# MAGIC (`:seed_floor` is the min cosine a seed must clear; `-1.0` = keep all, same as before —
+# MAGIC Lakebase connection: pgvector cosine seed -> recursive-CTE k-hop expansion. Pass
+# MAGIC `cur.execute(sql, params)` a dict with `query_embedding` (the user question's embedding,
+# MAGIC as a `'[...]'` pgvector literal, not a Python list), `seed_k`, `max_hops`, `seed_floor`,
+# MAGIC (`seed_floor` is the min cosine a seed must clear; `-1.0` = keep all, same as before —
 # MAGIC raise toward
 # MAGIC a floor calibrated to your model's similarity range — ~`0.55` for
-# MAGIC `databricks-gte-large-en` on this graph). `:authority_boost` of `1.0` keeps the
+# MAGIC `databricks-gte-large-en` on this graph). `authority_boost` of `1.0` keeps the
 # MAGIC pre-authority ranking; all five binds are required. To validate the logic
 # MAGIC *without* Lakebase, run `smoketest/graphrag_logic_smoketest.py`.
 
@@ -137,9 +138,9 @@ print("Complete the cell above to apply sql/schema.sql and INSERT the graph.")
 question = "Which suppliers can cover skim milk demand surging in the Northeast?"
 q_emb = embed([question])[0]
 print(
-    f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
-    "sql/graphrag_retrieval.sql with :seed_k, :max_hops, :seed_floor (-1.0 = keep all) and "
-    ":authority_boost (1.0 = rank as before), "
+    f"embedded question (dim={len(q_emb)}). Pass it as query_embedding (a '[...]' literal) to "
+    "sql/graphrag_retrieval.sql with seed_k, max_hops, seed_floor (-1.0 = keep all) and "
+    "authority_boost (1.0 = rank as before), "
     f"execute against Lakebase, then pass the ranked context to: {CHAT_ENDPOINT}"
 )
 
@@ -147,7 +148,7 @@ print(
 
 # MAGIC %md
 # MAGIC ## 4b. See authority ranking work — ✍️ OPTIONAL
-# MAGIC `:authority_boost` does nothing until some node is marked as curated. Step 5 builds those
+# MAGIC `authority_boost` does nothing until some node is marked as curated. Step 5 builds those
 # MAGIC from Unity Catalog metric views; this step marks one by hand instead, so you can see the
 # MAGIC ranking move without any metric view at all. Anything that can write the `props` key
 # MAGIC participates, which keeps the ranking independent of where curation comes from.
@@ -163,11 +164,17 @@ print(
 # MAGIC  WHERE node_id = 'supplier:S3';
 # MAGIC ```
 # MAGIC
+# MAGIC This assumes you built the graph directly from `sql/schema.sql`, the path this notebook
+# MAGIC follows, so `graph.nodes` is a plain table. If you serve it as a Lakebase synced table
+# MAGIC from Unity Catalog instead, that copy is read-only (reads, indexes and `DROP TABLE` only,
+# MAGIC and a write breaks the sync), so set `source_method` in the Delta source upstream and let
+# MAGIC the sync carry it.
+# MAGIC
 # MAGIC Now run the retrieval twice, changing only the one bind:
 # MAGIC
-# MAGIC - `:authority_boost = 1.0` — ranking is unchanged from before, and `supplier:S3` now
+# MAGIC - `authority_boost = 1.0` — ranking is unchanged from before, and `supplier:S3` now
 # MAGIC   reports `source_class = 'uc_certified'` so an answer can cite it.
-# MAGIC - `:authority_boost = 2.0` — `supplier:S3` moves up, because its relevance score is
+# MAGIC - `authority_boost = 2.0` — `supplier:S3` moves up, because its relevance score is
 # MAGIC   multiplied while everything else keeps weight `1.0`.
 # MAGIC
 # MAGIC What to look for, because it is the point of the design: a **modest** boost does not hand

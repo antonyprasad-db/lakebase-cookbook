@@ -90,20 +90,18 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   similarities span only `0.38`-`0.71`, so a `0.3` floor changes nothing while `0.555` drops
   every distractor and keeps every on-topic node (the on-topic supplier below the floor still
   arrives via graph expansion). Cosine ranges
-  `[-1, 1]`, so `-1.0` keeps all seeds (identical to no floor). **`:seed_floor` is a required
-  bind** — Postgres has no server-side default for a named parameter, so existing callers of the
-  SQL must pass it even to keep the old behavior (bind `-1.0`); omitting a required bind raises a
-  `bind message supplies N parameters, but prepared statement requires N+1` error. The exact
-  numbers depend on the driver, since `:query_embedding` appears three times and drivers differ
-  on whether repeated names collapse to one bind. The Python twin
+  `[-1, 1]`, so `-1.0` keeps all seeds (identical to no floor). **`%(seed_floor)s` is a required
+  bind** — a named parameter has no default, so existing callers of the SQL must pass it even to
+  keep the old behavior (bind `-1.0`); with psycopg, omitting it raises
+  `query parameter missing: seed_floor` before the query is sent. The Python twin
   defaults it to `-1.0`, so Python callers need no change. **Watch the empty-seed case:** a floor
   above every node's similarity empties the seed CTE and the query returns *zero* rows — detect
   that in your caller and either retry at `-1.0` or decline to answer, rather than synthesizing
-  from no context. See `:seed_floor` in
+  from no context. See `%(seed_floor)s` in
   [`sql/graphrag_retrieval.sql`](sql/graphrag_retrieval.sql).
-- **`:authority_boost` is a required bind, exactly like `:seed_floor`.** Adding it changes the SQL's
-  parameter arity, so an existing caller that does not pass it raises
-  `bind message supplies 4 parameters, but prepared statement requires 5` — the ranking is
+- **`%(authority_boost)s` is a required bind, exactly like `%(seed_floor)s`.** Adding it changes the
+  SQL's parameters, so an existing caller that does not pass it raises
+  `query parameter missing: authority_boost` — the ranking is
   backward-compatible, the *bind signature* is not. Bind `1.0` to keep the previous behaviour
   exactly. The Python twin defaults it to `1.0`, so Python callers need no change. Values below
   `1.0` are clamped up to `1.0` in both halves, because a fractional or negative multiplier would
@@ -153,7 +151,7 @@ A node marked as certified carries it in `props`, the same place edges already c
 {"source_method": "uc_certified"}
 ```
 
-Retrieval then multiplies that node's score by `:authority_boost` and returns two extra columns:
+Retrieval then multiplies that node's score by `%(authority_boost)s` and returns two extra columns:
 `source_class` (`uc_certified` / `inferred`) so an answer can cite what resolved it, and
 `authority_score`, the rounded weighted value. Note the ordering uses the UNROUNDED
 weighted score, not this column — see the caveats below before re-sorting client-side on it.
@@ -169,7 +167,7 @@ stage against its own fixture, not by running `sql/graphrag_retrieval.sql` itsel
 two together, so a change to the query must be mirrored in the test by hand. Only a live Lakebase run
 exercises the real file.
 
-**`:authority_boost` defaults to 1.0, which leaves every weight at 1.0.** Scores are then unchanged
+**`%(authority_boost)s` defaults to 1.0, which leaves every weight at 1.0.** Scores are then unchanged
 and distinctly-scored rows keep their relative order. It is **not** a byte-identical no-op, though,
 and the difference is not hypothetical — measured live against a 1219-node graph, two pairs in the
 top ten were exact score ties (`0.2945` and `0.1473`), and they now order deterministically by

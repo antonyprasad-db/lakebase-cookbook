@@ -113,7 +113,7 @@ def retrieve(
     #      * the sort uses the UNROUNDED key; ordering by the rounded output would collapse
     #        scores differing beyond 4 dp into ties (0.175024 / 0.175006 -> 0.1750) and let
     #        the tiebreak reorder them, which is not a no-op.
-    # Clamped to >= 1.0, mirroring GREATEST(:authority_boost, 1.0) in the SQL. `score > 0`
+    # Clamped to >= 1.0, mirroring GREATEST(%(authority_boost)s, 1.0) in the SQL. `score > 0`
     # below stops a NEGATIVE score being made worse; this stops a boost BELOW 1.0 doing the
     # same thing to a positive one. Together they guarantee a boost can never rank a certified
     # node lower than it would have sat unboosted, whatever the caller passes.

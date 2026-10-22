@@ -4,7 +4,7 @@ WHAT THIS PROVES (offline, no Databricks / no Lakebase / no model endpoint):
   1. The vector-seed step ranks the semantically-closest node first.
   2. The recursive-CTE graph expansion pulls in graph-connected context that a
      pure vector search would MISS — the whole point of GraphRAG — bounded by
-     :max_hops with a working cycle guard.
+     %(max_hops)s with a working cycle guard.
   3. The blended score (seed_similarity * 0.5^hop) ranks seeds above their
      neighbors and decays with hop distance.
   4. The BUILD-side graph assembly (notebooks/graph_build.assemble_graph) turns
