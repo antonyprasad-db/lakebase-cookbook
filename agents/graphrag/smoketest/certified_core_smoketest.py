@@ -1,7 +1,7 @@
 """Offline checks for graph_certified.py — no warehouse, no Lakebase, no model endpoint.
 
 The DESCRIBE fixture below is VERBATIM output from a live Unity Catalog metric view
-(cchan_catalog.metric_view_lab.order_details_metric_view), trimmed in field count but not in
+(demo_catalog.metric_view_lab.order_details_metric_view), trimmed in field count but not in
 shape: same four columns, same ' measure' type suffix, same spacer row, same
 '# Detailed Table Information' boundary, same metadata JSON. Parsing DESCRIBE is the one brittle
 coupling in the module, so its SHAPE is pinned against real output rather than invented.
@@ -72,10 +72,10 @@ DESCRIBE_ROWS = [
     ["broken_meta", "string", "metadata is not JSON", "{not json"],
     ["", "", "", ""],
     ["# Detailed Table Information", "", "", ""],
-    ["Catalog", "cchan_catalog", "", ""],
+    ["Catalog", "demo_catalog", "", ""],
     ["Database", "metric_view_lab", "", ""],
     ["Table", "order_details_metric_view", "", ""],
-    ["Owner", "chitra.chandrakumar@databricks.com", "", ""],
+    ["Owner", "owner@example.com", "", ""],
     ["Created Time", "Wed Dec 17 17:27:39 UTC 2025", "", ""],
     ["Type", "METRIC_VIEW", "", ""],
 ]
@@ -95,13 +95,11 @@ class FakeReader:
 def main() -> int:
     print("== TEST 1: DESCRIBE parsing (the module's one brittle coupling) ==")
     view = parse_describe(
-        DESCRIBE_ROWS, "cchan_catalog", "metric_view_lab", "order_details_metric_view"
+        DESCRIBE_ROWS, "demo_catalog", "metric_view_lab", "order_details_metric_view"
     )
-    check("fqn is assembled", view.fqn, "cchan_catalog.metric_view_lab.order_details_metric_view")
+    check("fqn is assembled", view.fqn, "demo_catalog.metric_view_lab.order_details_metric_view")
     check("field count excludes the spacer and the metadata block", len(view.fields), 5)
-    check(
-        "owner is lifted from the metadata block", view.owner, "chitra.chandrakumar@databricks.com"
-    )
+    check("owner is lifted from the metadata block", view.owner, "owner@example.com")
     check("created time is lifted", view.created_at, "Wed Dec 17 17:27:39 UTC 2025")
     check(
         "metadata keys did NOT leak in as fields",
@@ -572,10 +570,10 @@ def main() -> int:
         is_internal_catalog("__databricks_internal_catalog_lakeview_1444828305810485"),
         True,
     )
-    check("a user catalog is not internal", is_internal_catalog("cchan_catalog"), False)
+    check("a user catalog is not internal", is_internal_catalog("demo_catalog"), False)
     reader = FakeReader(
         [
-            ["cchan_catalog", "metric_view_lab", "order_details_metric_view"],
+            ["demo_catalog", "metric_view_lab", "order_details_metric_view"],
             ["__databricks_internal_catalog_lakeview_144", "abc", "lakegenie_01f158"],
             ["another_catalog", "sales", "revenue_mv"],
         ],
@@ -585,7 +583,7 @@ def main() -> int:
     check(
         "internal metric views are dropped",
         [c for c, _, _ in found],
-        ["cchan_catalog", "another_catalog"],
+        ["demo_catalog", "another_catalog"],
     )
     check("discovery filters on table_type", "table_type = 'METRIC_VIEW'" in reader.seen[0], True)
     check("discovery orders its results", "ORDER BY" in reader.seen[0], True)
@@ -621,7 +619,7 @@ def main() -> int:
     discover_metric_views(unscoped, catalog=None)
     check("catalog=None is unscoped by design", "table_catalog = " in unscoped.seen[0], False)
 
-    for ok_name in ("my_catalog", "cchan_catalog", "a-b_1"):
+    for ok_name in ("my_catalog", "demo_catalog", "a-b_1"):
         accepted = True
         try:
             discover_metric_views(FakeReader([], DESCRIBE_ROWS), catalog=ok_name)
@@ -709,14 +707,14 @@ def main() -> int:
     check(
         "authority metadata rides on the view node",
         (view_node.get("props") or {}).get("owner"),
-        "chitra.chandrakumar@databricks.com",
+        "owner@example.com",
     )
     # these three ride into gold_triplets / are the reason DESCRIBE is mandatory, and all three
     # previously survived removal
     check(
         "a field node carries its metric_view back-reference",
         ((by_id.get(rev_id) or {}).get("props") or {}).get("metric_view"),
-        "cchan_catalog.metric_view_lab.order_details_metric_view",
+        "demo_catalog.metric_view_lab.order_details_metric_view",
     )
     check(
         "a field node carries its data_type",
@@ -731,12 +729,12 @@ def main() -> int:
     check(
         "the view node id carries the metricview: prefix",
         node_id_for_view(view),
-        "metricview:cchan_catalog.metric_view_lab.order_details_metric_view",
+        "metricview:demo_catalog.metric_view_lab.order_details_metric_view",
     )
     check(
         "node ids are namespaced and stable",
         sorted(n["node_id"] for n in rows.nodes)[0],
-        "dimension:cchan_catalog.metric_view_lab.order_details_metric_view.broken_meta",
+        "dimension:demo_catalog.metric_view_lab.order_details_metric_view.broken_meta",
     )
     rev = next(n for n in rows.nodes if n["node_id"].endswith(".total_revenue"))
     check("a field node prefers the curator's display name", rev["name"], "Total Revenue ($)")
@@ -781,10 +779,10 @@ def main() -> int:
 
     print("\n== TEST 5: read_metric_view wires discovery to parsing ==")
     r2 = FakeReader([], DESCRIBE_ROWS)
-    v2 = read_metric_view(r2, "cchan_catalog", "metric_view_lab", "order_details_metric_view")
+    v2 = read_metric_view(r2, "demo_catalog", "metric_view_lab", "order_details_metric_view")
     check(
         "identifiers are backtick-quoted in DESCRIBE",
-        "`cchan_catalog`.`metric_view_lab`.`order_details_metric_view`" in r2.seen[0],
+        "`demo_catalog`.`metric_view_lab`.`order_details_metric_view`" in r2.seen[0],
         True,
     )
     # plain DESCRIBE returns no 4th metadata column and no metadata block, so display_name,
