@@ -111,7 +111,8 @@ Defaults that keep retrieval fast, precise, and cost-predictable on real Lakebas
   demote the certified node the boost exists to promote. **A non-finite or absent boost means "no
   boost":** NaN, +/-Infinity and NULL all resolve to `1.0` on both halves rather than erroring,
   since a boost derived from a score ratio can reach any of them; a Decimal or numeric string is
-  honoured normally. Calibrate it once a certified core actually
+  honoured normally. One SQL-only limit: a boost beyond double-precision range (for example
+  `10**400`) fails the query, where the twin falls back to `1.0`. Calibrate it once a certified core actually
   exists — start around `1.2`-`2.0` and check against your own graph, since the useful value depends
   on the score gaps your embedding model produces, not on a portable constant.
 - **Keep a minimum Lakebase compute above zero for latency-sensitive serving.** After scale-to-zero,
@@ -166,8 +167,9 @@ both directions: a sufficient boost *does* promote a certified node to rank 1, a
 *does not* let the least relevant certified node reach rank 1. A sort-key implementation passes the
 first and fails the second. Both halves are covered, including the negative-score and
 below-1.0-boost guards. Note the SQL side is exercised as a **hand transcription** of the assemble
-stage against its own fixture, not by running `sql/graphrag_retrieval.sql` itself — nothing ties the
-two together, so a change to the query must be mirrored in the test by hand. Only a live Lakebase run
+stage against its own fixture, not by running `sql/graphrag_retrieval.sql` itself. The suite reads
+the real file only to check its bind placeholders (TEST 9), so a change to the query logic must be
+mirrored in the test by hand. Only a live Lakebase run
 exercises the real file.
 
 **`authority_boost` defaults to 1.0, which leaves every weight at 1.0.** Scores are then unchanged

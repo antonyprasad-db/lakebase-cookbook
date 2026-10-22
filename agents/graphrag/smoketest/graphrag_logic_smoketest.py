@@ -798,14 +798,15 @@ def main() -> int:
     def authority_sql(boost):
         """A TRANSCRIPTION of the assemble stage of sql/graphrag_retrieval.sql, DuckDB dialect.
 
-        NOT the file itself — nothing ties the two together, so any change to the real query's
+        NOT the file itself — TEST 9 reads the .sql only for its bind placeholders, so any change
+        to the real query's
         weight, clamp, non-finite guard, ordering or source_class handling must be mirrored here
         by hand. This has already drifted twice: the positive-score guard and then the GREATEST
         clamp each landed in the .sql file one step before this copy, and the suite stayed green
-        in between. There is no automated drift detector; nothing in this suite reads the .sql.
+        in between. There is no automated drift detector for the query logic.
 
         A TRANSCRIPTION, not the file. The dialect differs throughout — json_extract_string vs
-        `->>`, DOUBLE vs numeric (DuckDB's DECIMAL cannot hold NaN), no LIMIT, fewer columns —
+        `->>`, no LIMIT, fewer columns —
         and DuckDB types each `?` independently where Postgres resolves one type for the named
         parameter. So this exercises the guard's LOGIC and never the Postgres bind-typing path.
         `boost` is a real bind because NaN cannot be interpolated as a bare literal. The shipped
@@ -1085,12 +1086,21 @@ def main() -> int:
     with open(sql_path, encoding="utf-8") as fh:
         sql = fh.read()
     binds = {"query_embedding", "seed_k", "max_hops", "seed_floor", "authority_boost"}
+    sql = sql.replace("%%", "")  # an escaped %% is literal text to psycopg, never a bind
     placeholders = set(re.findall(r"%\((\w+)\)s", sql))
     check("sql: placeholders are exactly the five binds", placeholders, binds)
-    check("sql: no stray percent sign", re.findall(r"%(?![(%])", sql.replace("%%", "")), [])
+    check("sql: no stray percent sign", re.findall(r"%(?![(])", sql), [])
     check("sql: every %( is a complete %(name)s", re.findall(r"%\((?!\w+\)s)", sql), [])
     colon_bind = r"(?<![:\w]):(?:" + "|".join(sorted(binds)) + r")\b"
     check("sql: no :name binds left", re.findall(colon_bind, sql), [])
+    nan_guard = "%(seed_floor)s::float8 <> 'NaN'::float8"
+    check("sql: the seed CTE rejects a NaN seed_floor", nan_guard in sql.split("adj AS")[0], True)
+    # the twin's side of the same contract: a numeric string floor, and a NaN floor
+    as_float = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2, seed_floor=0.4)
+    as_str = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2, seed_floor="0.4")
+    check("py: a numeric-string seed_floor ranks as the float does", as_str, as_float)
+    nan_floor = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2, seed_floor=math.nan)
+    check("py: a NaN seed_floor admits no seed", nan_floor, [])
 
     print("\n" + "=" * 60)
     if FAILURES:

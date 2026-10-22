@@ -123,7 +123,7 @@ def retrieve(
     # node lower than it would have sat unboosted, whatever the caller passes.
     # NaN needs its own arm: max(nan, 1.0) is nan, so it slips past the clamp, and the two
     # halves then disagree in OPPOSITE directions — Python sorts nan low (demoting the node)
-    # while Postgres numeric NaN sorts greater than everything (promoting it to rank 1). NaN is
+    # while Postgres NaN sorts greater than everything (promoting it to rank 1). NaN is
     # reachable whenever a caller derives the boost from a score ratio. `x != x` is the portable
     # NaN test.
     # Converted, then clamped. float() honours an int, a Decimal or a numeric string; what

@@ -7,10 +7,10 @@
 --
 -- Run it with psycopg 3, the example's declared driver: cur.execute(sql, params), where
 -- params is a dict with the five keys below. query_embedding, seed_floor and authority_boost
--- are cast where they are used, so the embedding may be a list of Python floats (not a numpy
--- array, nor a list mixing ints and floats: call .tolist() or map float) or a pgvector literal
--- such as '[0.12,-0.03,...]', and seed_floor / authority_boost may be any number or numeric
--- string. seed_k and max_hops are plain integers.
+-- are cast where they are used, so the embedding may be a list whose every element is a Python
+-- float (a numpy array, or a list holding ints, can fail: call .tolist() and map float) or a
+-- pgvector literal such as '[0.12,-0.03,...]', and seed_floor / authority_boost may be an int,
+-- float, Decimal or numeric string (not a bool). seed_k and max_hops are plain integers.
 -- Results are capped by the fixed LIMIT 25 at the end. There is no limit bind: the Python
 -- twin's limit argument has no SQL counterpart, and psycopg ignores extra dict keys.
 --
