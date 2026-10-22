@@ -4,7 +4,7 @@ WHAT THIS PROVES (offline, no Databricks / no Lakebase / no model endpoint):
   1. The vector-seed step ranks the semantically-closest node first.
   2. The recursive-CTE graph expansion pulls in graph-connected context that a
      pure vector search would MISS — the whole point of GraphRAG — bounded by
-     %(max_hops)s with a working cycle guard.
+     max_hops with a working cycle guard.
   3. The blended score (seed_similarity * 0.5^hop) ranks seeds above their
      neighbors and decays with hop distance.
   4. The BUILD-side graph assembly (notebooks/graph_build.assemble_graph) turns
@@ -1073,6 +1073,23 @@ def main() -> int:
         check(f"py: boost={label} does not raise and stays finite", ok, True)
 
     acon.close()
+
+    # ---- 9) the retrieval SQL's bind contract, read from the shipped file
+    # Nothing else here reads sql/graphrag_retrieval.sql, so a renamed bind, a stray percent
+    # sign (psycopg parses comments too) or a reintroduced :name bind would otherwise surface
+    # only at runtime. Checked offline, with no database.
+    print("\n== TEST 9: retrieval SQL bind contract (psycopg named binds) ==")
+    import re
+
+    sql_path = os.path.join(os.path.dirname(__file__), "..", "sql", "graphrag_retrieval.sql")
+    with open(sql_path, encoding="utf-8") as fh:
+        sql = fh.read()
+    binds = {"query_embedding", "seed_k", "max_hops", "seed_floor", "authority_boost"}
+    placeholders = set(re.findall(r"%\((\w+)\)s", sql))
+    check("sql: placeholders are exactly the five binds", placeholders, binds)
+    check("sql: no stray percent sign", re.findall(r"%(?![(%])", sql.replace("%%", "")), [])
+    colon_bind = r"(?<![:\w]):(?:" + "|".join(sorted(binds)) + r")\b"
+    check("sql: no :name binds left", re.findall(colon_bind, sql), [])
 
     print("\n" + "=" * 60)
     if FAILURES:

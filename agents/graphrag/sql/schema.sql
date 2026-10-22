@@ -1,7 +1,8 @@
 -- GraphRAG on Lakebase — served graph schema (real Postgres / pgvector)
 -- ---------------------------------------------------------------------------
--- This is the SERVE-side schema: what the graph + embeddings look like once
--- synced from Unity Catalog into Lakebase Postgres for low-latency retrieval.
+-- This is the SERVE-side schema: the graph + embeddings tables retrieval reads.
+-- This DDL builds them as plain tables, the path the notebook follows. Serving
+-- them as Lakebase synced tables from Unity Catalog is out of scope (see Notes).
 -- Runs on Databricks Lakebase (managed Postgres 16/17). Uses only extensions
 -- verified as supported on Lakebase: vector (pgvector 0.8.0), ltree, pg_trgm.
 -- There is NO Apache AGE / native graph engine — the graph is relational
@@ -60,9 +61,10 @@ CREATE INDEX IF NOT EXISTS node_embeddings_hnsw
 
 -- ---------------------------------------------------------------------------
 -- Notes
--- * nodes/edges/node_embeddings are populated by the build notebook (entity
---   entity extraction → UC Delta) and synced here via Lakebase synced tables;
---   on the served copy, only reads + index creation are permitted.
+-- * In this example nodes/edges/node_embeddings are loaded directly into these
+--   plain tables, so writes such as notebook step 4b's UPDATE work. Served as
+--   Lakebase synced tables instead, they would be read-only (reads, index
+--   creation and DROP TABLE only); that path is out of scope here.
 -- * Recursive-CTE traversal (see graphrag_retrieval.sql) is well-suited to
 --   bounded k-hop operational queries. It is NOT a billion-edge graph-analytics
 --   engine — for that, use a dedicated graph system.

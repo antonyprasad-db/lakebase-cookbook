@@ -125,7 +125,7 @@ print("Complete the cell above to apply sql/schema.sql and INSERT the graph.")
 # MAGIC Once the graph is loaded (step 3), run `sql/graphrag_retrieval.sql` against the same
 # MAGIC Lakebase connection: pgvector cosine seed -> recursive-CTE k-hop expansion. Pass
 # MAGIC `cur.execute(sql, params)` a dict with `query_embedding` (the user question's embedding,
-# MAGIC as a `'[...]'` pgvector literal, not a Python list), `seed_k`, `max_hops`, `seed_floor`,
+# MAGIC a list of floats), `seed_k`, `max_hops`, `seed_floor`,
 # MAGIC (`seed_floor` is the min cosine a seed must clear; `-1.0` = keep all, same as before —
 # MAGIC raise toward
 # MAGIC a floor calibrated to your model's similarity range — ~`0.55` for
@@ -138,7 +138,7 @@ print("Complete the cell above to apply sql/schema.sql and INSERT the graph.")
 question = "Which suppliers can cover skim milk demand surging in the Northeast?"
 q_emb = embed([question])[0]
 print(
-    f"embedded question (dim={len(q_emb)}). Pass it as query_embedding (a '[...]' literal) to "
+    f"embedded question (dim={len(q_emb)}). Pass it as query_embedding to "
     "sql/graphrag_retrieval.sql with seed_k, max_hops, seed_floor (-1.0 = keep all) and "
     "authority_boost (1.0 = rank as before), "
     f"execute against Lakebase, then pass the ranked context to: {CHAT_ENDPOINT}"
@@ -165,10 +165,9 @@ print(
 # MAGIC ```
 # MAGIC
 # MAGIC This assumes you built the graph directly from `sql/schema.sql`, the path this notebook
-# MAGIC follows, so `graph.nodes` is a plain table. If you serve it as a Lakebase synced table
-# MAGIC from Unity Catalog instead, that copy is read-only (reads, indexes and `DROP TABLE` only,
-# MAGIC and a write breaks the sync), so set `source_method` in the Delta source upstream and let
-# MAGIC the sync carry it.
+# MAGIC follows, so `graph.nodes` is a plain table. Serving it as a Lakebase synced table from
+# MAGIC Unity Catalog is out of scope for this example: that copy is read-only (reads, indexes and
+# MAGIC `DROP TABLE` only, and a write breaks the sync), so this step does not apply to it.
 # MAGIC
 # MAGIC Now run the retrieval twice, changing only the one bind:
 # MAGIC
