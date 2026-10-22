@@ -324,15 +324,15 @@ cd agents/graphrag
 uv run --python 3.11 --with duckdb --with numpy smoketest/graphrag_logic_smoketest.py
 ```
 
-138 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
+142 assertions: semantic seed, graph expansion surfacing connected context flat RAG misses,
 authority ranking (certified-over-inferred, the positive-score and below-1.0 clamps, NaN /
 +Infinity / None boosts asserted on BOTH halves, odd bind types — Decimal, an int wider than a
 float, a string — reaching neither an exception nor a non-finite score in the Python twin (in
 SQL a boost beyond double-precision range fails the query), unrounded ordering,
 verbatim `source_class`),
 dangling-edge guard, blended-score ranking, depth bound, the `seed_floor` distractor guard, and
-the retrieval SQL's bind contract (exactly the five psycopg placeholders, none malformed, no stray
-`%`, no leftover `:name`).
+the retrieval SQL's bind contract (exactly the five psycopg placeholders, each with its cast, none
+malformed, no stray `%`, no leftover `:name`).
 
 The certified-core builder has its own suite, which needs no warehouse — the `SqlReader` protocol
 lets a fake replay recorded output:

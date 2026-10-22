@@ -1032,7 +1032,7 @@ def main() -> int:
             True,
         )
 
-    # A Decimal boost must be HONOURED, not collapsed — it is what a NUMERIC bind hands back.
+    # A Decimal boost must be HONOURED, not collapsed.
     flt = agent_retrieve(q, certified, bedges, a_emb, seed_k=6, max_hops=2, authority_boost=2.0)
     try:
         # Caught, not called bare: a regressed guard raises TypeError here (max(Decimal, 1.0)
@@ -1050,7 +1050,7 @@ def main() -> int:
         [r["node_id"] for r in flt],
     )
 
-    # A NUMERIC bind arrives as Decimal, and an int can exceed float range. Neither may raise out
+    # A caller may pass a Decimal, and an int can exceed float range. Neither may raise out
     # of retrieval, and neither may leak a Decimal into `score * weight`.
     for odd, label in [
         (Decimal("2.0"), "Decimal(2.0)"),
@@ -1093,14 +1093,27 @@ def main() -> int:
     check("sql: every %( is a complete %(name)s", re.findall(r"%\((?!\w+\)s)", sql), [])
     colon_bind = r"(?<![:\w]):(?:" + "|".join(sorted(binds)) + r")\b"
     check("sql: no :name binds left", re.findall(colon_bind, sql), [])
+    code = re.sub(r"--[^\n]*", "", sql)  # executable SQL only: a commented-out guard must not count
+    casts = {"query_embedding": "::vector", "seed_floor": "::float8", "authority_boost": "::float8"}
+    used = set(re.findall(r"%\((\w+)\)s(::\w+)?", code))
+    check("sql: every use of a bind carries its cast", used, {(b, casts.get(b, "")) for b in binds})
     nan_guard = "%(seed_floor)s::float8 <> 'NaN'::float8"
-    check("sql: the seed CTE rejects a NaN seed_floor", nan_guard in sql.split("adj AS")[0], True)
-    # the twin's side of the same contract: a numeric string floor, and a NaN floor
-    as_float = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2, seed_floor=0.4)
-    as_str = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2, seed_floor="0.4")
-    check("py: a numeric-string seed_floor ranks as the float does", as_str, as_float)
-    nan_floor = agent_retrieve(q, bnodes, bedges, a_emb, seed_k=6, max_hops=2, seed_floor=math.nan)
-    check("py: a NaN seed_floor admits no seed", nan_floor, [])
+    check("sql: the seed CTE rejects a NaN seed_floor", nan_guard in code.split("adj AS")[0], True)
+
+    # the twin's side of the same contract: a numeric string floor, and a NaN floor. Caught, not
+    # called bare, so a regression reports one FAIL instead of aborting the run.
+    def floor_run(seed_floor):
+        try:
+            return agent_retrieve(
+                q, bnodes, bedges, a_emb, seed_k=6, max_hops=2, seed_floor=seed_floor
+            )
+        except Exception as err:  # noqa: BLE001
+            return f"{type(err).__name__}: {err}"
+
+    check(
+        "py: a numeric-string seed_floor ranks as the float does", floor_run("0.4"), floor_run(0.4)
+    )
+    check("py: a NaN seed_floor admits no seed", floor_run(math.nan), [])
 
     print("\n" + "=" * 60)
     if FAILURES:
