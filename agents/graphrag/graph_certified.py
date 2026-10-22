@@ -100,9 +100,10 @@ _MEASURE_SUFFIX = " measure"
 # allow-list guarding string interpolation, so anything unusual should be rejected loudly
 # rather than accommodated.
 _CATALOG_RE = re.compile(r"[A-Za-z0-9_-]+")
-_SUBHEADER_TYPE_CELL = "data_type"   # literal 2nd cell of the "# col_name" sub-header row
-_SUBHEADER_NAME_CELL = "col_name"    # literal 1st cell, minus its "#"
+_SUBHEADER_TYPE_CELL = "data_type"  # literal 2nd cell of the "# col_name" sub-header row
+_SUBHEADER_NAME_CELL = "col_name"  # literal 1st cell, minus its "#"
 _DETAIL_BOUNDARY = "# Detailed Table Information"
+
 
 # A '#' prefix ALONE cannot mark the boundary: measures are routinely named "# Orders" or
 # "# of Customers", and treating those as the boundary silently truncates the field list and
@@ -140,8 +141,10 @@ def _is_column_subheader(col: str, data_type: str) -> bool:
     """
     if not col.startswith("#"):
         return False
-    return (data_type.strip().lower() == _SUBHEADER_TYPE_CELL
-            or col.lstrip("#").strip().lower() == _SUBHEADER_NAME_CELL)
+    return (
+        data_type.strip().lower() == _SUBHEADER_TYPE_CELL
+        or col.lstrip("#").strip().lower() == _SUBHEADER_NAME_CELL
+    )
 
 
 def _is_detail_boundary(col: str) -> bool:
@@ -216,7 +219,8 @@ def is_internal_catalog(catalog: str) -> bool:
 
 
 def discover_metric_views(
-    reader: SqlReader, catalog: str | None = None,
+    reader: SqlReader,
+    catalog: str | None = None,
 ) -> list[tuple[str, str, str]]:
     """Return (catalog, schema, name) for each user metric view.
 
@@ -247,7 +251,8 @@ def discover_metric_views(
         "ORDER BY table_catalog, table_schema, table_name"
     )
     return [
-        (c, s, n) for c, s, n in ((r[0], r[1], r[2]) for r in reader.rows(sql))
+        (c, s, n)
+        for c, s, n in ((r[0], r[1], r[2]) for r in reader.rows(sql))
         if not is_internal_catalog(c)
     ]
 
@@ -294,7 +299,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         col = str(row[0] or "").strip() if len(row) > 0 else ""
         val = str(row[1] or "").strip() if len(row) > 1 else ""
         if not col:
-            continue                                  # spacer row between the two blocks
+            continue  # spacer row between the two blocks
         # THE FIELD BLOCK IS ONLY WHAT PRECEDES THE FIRST SECTION HEADER, and this is stricter
         # than it looks on purpose. DESCRIBE EXTENDED emits '# Partition Information' and
         # '# Metadata Columns' on various runtimes, each followed by a bare
@@ -325,7 +330,7 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
                 saw_boundary = True
             continue
         if in_sections and not in_detail:
-            continue    # inside a non-detail section: sub-header or body, never a field
+            continue  # inside a non-detail section: sub-header or body, never a field
         if in_detail:
             # First NON-EMPTY write wins. The real detail block is read before anything following
             # it, so a later section cannot beat it — that closes the overwrite where a following
@@ -373,15 +378,24 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
                 # Only string elements: a malformed list like [null, 5, {"a": 1}] would
                 # otherwise reach props.synonyms and the embedded text as "None", "5" and
                 # "{'a': 1}".
-                synonyms = (tuple(x for x in syn if isinstance(x, str) and x)
-                            if isinstance(syn, list) else ())
+                synonyms = (
+                    tuple(x for x in syn if isinstance(x, str) and x)
+                    if isinstance(syn, list)
+                    else ()
+                )
 
         if display_name or synonyms:
             saw_enrichment = True
-        fields.append(SemanticField(
-            name=col, data_type=data_type, comment=comment,
-            is_measure=is_measure, display_name=display_name, synonyms=synonyms,
-        ))
+        fields.append(
+            SemanticField(
+                name=col,
+                data_type=data_type,
+                comment=comment,
+                is_measure=is_measure,
+                display_name=display_name,
+                synonyms=synonyms,
+            )
+        )
 
     # Refuse to guess when the shape is not what we expect. Without this, a renamed or absent
     # boundary turns the metadata block itself into fields: 'Owner' becomes a dimension node
@@ -407,9 +421,14 @@ def parse_describe(rows: list[list[Any]], catalog: str, schema: str, name: str) 
         )
 
     return CertifiedView(
-        catalog=catalog, schema=schema, name=name, fields=tuple(fields),
-        owner=meta.get("Owner", ""), created_at=meta.get("Created Time", ""),
-        comment=meta.get("Comment", ""), enrichment_available=saw_enrichment,
+        catalog=catalog,
+        schema=schema,
+        name=name,
+        fields=tuple(fields),
+        owner=meta.get("Owner", ""),
+        created_at=meta.get("Created Time", ""),
+        comment=meta.get("Comment", ""),
+        enrichment_available=saw_enrichment,
     )
 
 
@@ -430,7 +449,9 @@ def read_metric_view(reader: SqlReader, catalog: str, schema: str, name: str) ->
             )
     return parse_describe(
         reader.rows(f"DESCRIBE EXTENDED `{catalog}`.`{schema}`.`{name}`"),
-        catalog, schema, name,
+        catalog,
+        schema,
+        name,
     )
 
 
@@ -484,12 +505,14 @@ def certified_rows(view: CertifiedView) -> GraphRows:
     if view.comment:
         view_props["comment"] = view.comment
 
-    out.nodes.append({
-        "node_id": node_id_for_view(view),
-        "node_type": VIEW_NODE_TYPE,
-        "name": view.name,
-        "props": view_props,
-    })
+    out.nodes.append(
+        {
+            "node_id": node_id_for_view(view),
+            "node_type": VIEW_NODE_TYPE,
+            "name": view.name,
+            "props": view_props,
+        }
+    )
 
     for f in view.fields:
         props = {
@@ -508,24 +531,28 @@ def certified_rows(view: CertifiedView) -> GraphRows:
             props["display_name"] = f.display_name
         if f.synonyms:
             props["synonyms"] = list(f.synonyms)
-        out.nodes.append({
-            "node_id": node_id_for_field(view, f),
-            # The human label prefers display_name: it is what a curator chose to call the
-            # field, and it is what an embedding of this node should match a question against.
-            "name": f.display_name or f.name,
-            "node_type": MEASURE_NODE_TYPE if f.is_measure else DIMENSION_NODE_TYPE,
-            "props": props,
-        })
-        out.edges.append({
-            "src_id": node_id_for_view(view),
-            "dst_id": node_id_for_field(view, f),
-            "rel": HAS_MEASURE if f.is_measure else HAS_DIMENSION,
-            "props": {
-                "source_method": CERTIFIED_SOURCE_METHOD,
-                "source_agent": SOURCE_AGENT,
-                "confidence": 1.0,   # curated by a human, not inferred
-            },
-        })
+        out.nodes.append(
+            {
+                "node_id": node_id_for_field(view, f),
+                # The human label prefers display_name: it is what a curator chose to call the
+                # field, and it is what an embedding of this node should match a question against.
+                "name": f.display_name or f.name,
+                "node_type": MEASURE_NODE_TYPE if f.is_measure else DIMENSION_NODE_TYPE,
+                "props": props,
+            }
+        )
+        out.edges.append(
+            {
+                "src_id": node_id_for_view(view),
+                "dst_id": node_id_for_field(view, f),
+                "rel": HAS_MEASURE if f.is_measure else HAS_DIMENSION,
+                "props": {
+                    "source_method": CERTIFIED_SOURCE_METHOD,
+                    "source_agent": SOURCE_AGENT,
+                    "confidence": 1.0,  # curated by a human, not inferred
+                },
+            }
+        )
     return out
 
 

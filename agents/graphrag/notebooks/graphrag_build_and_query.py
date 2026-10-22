@@ -18,16 +18,16 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "main")          # noqa: F821
-dbutils.widgets.text("schema", "graphrag")        # noqa: F821
+dbutils.widgets.text("catalog", "main")  # noqa: F821
+dbutils.widgets.text("schema", "graphrag")  # noqa: F821
 dbutils.widgets.text("embedding_endpoint", "databricks-gte-large-en")  # noqa: F821
-dbutils.widgets.text("chat_endpoint", "databricks-claude-sonnet-4-5")   # noqa: F821
-dbutils.widgets.text("lakebase_database", "")     # noqa: F821  # projects/<id>/branches/.../databases/<db>
+dbutils.widgets.text("chat_endpoint", "databricks-claude-sonnet-4-5")  # noqa: F821
+dbutils.widgets.text("lakebase_database", "")  # noqa: F821  # projects/<id>/branches/.../databases/<db>
 
-CATALOG = dbutils.widgets.get("catalog")          # noqa: F821
-SCHEMA = dbutils.widgets.get("schema")            # noqa: F821
+CATALOG = dbutils.widgets.get("catalog")  # noqa: F821
+SCHEMA = dbutils.widgets.get("schema")  # noqa: F821
 EMBED_ENDPOINT = dbutils.widgets.get("embedding_endpoint")  # noqa: F821
-CHAT_ENDPOINT = dbutils.widgets.get("chat_endpoint")        # noqa: F821
+CHAT_ENDPOINT = dbutils.widgets.get("chat_endpoint")  # noqa: F821
 LAKEBASE_DATABASE = dbutils.widgets.get("lakebase_database")  # noqa: F821
 
 # COMMAND ----------
@@ -136,10 +136,12 @@ print("Complete the cell above to apply sql/schema.sql and INSERT the graph.")
 
 question = "Which suppliers can cover skim milk demand surging in the Northeast?"
 q_emb = embed([question])[0]
-print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
-      "sql/graphrag_retrieval.sql with :seed_k, :max_hops, :seed_floor (-1.0 = keep all) and "
-      ":authority_boost (1.0 = rank as before), "
-      f"execute against Lakebase, then pass the ranked context to: {CHAT_ENDPOINT}")
+print(
+    f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
+    "sql/graphrag_retrieval.sql with :seed_k, :max_hops, :seed_floor (-1.0 = keep all) and "
+    ":authority_boost (1.0 = rank as before), "
+    f"execute against Lakebase, then pass the ranked context to: {CHAT_ENDPOINT}"
+)
 
 # COMMAND ----------
 
@@ -203,6 +205,7 @@ print(f"embedded question (dim={len(q_emb)}). Bind it as :query_embedding in "
 
 # COMMAND ----------
 
+
 # `SqlReader` is a Protocol, so anything that returns rows satisfies it. spark.sql is the
 # obvious choice inside a notebook; the module itself has no Spark dependency, which is what
 # keeps it unit-testable with no warehouse.
@@ -244,11 +247,16 @@ if CERTIFIED_CATALOG:
         certified_nodes.extend(rows.nodes)
         certified_edges.extend(rows.edges)
         measures = sum(1 for f in view.fields if f.is_measure)
-        enrich = ("" if view.enrichment_available
-                  else "  [!] no display_name/synonyms: reachable only by raw column name")
-        print(f"  {view.fqn}: {measures} measure(s), "
-              f"{len(view.fields) - measures} dimension(s), "
-              f"owner={view.owner or 'unknown'}{enrich}")
+        enrich = (
+            ""
+            if view.enrichment_available
+            else "  [!] no display_name/synonyms: reachable only by raw column name"
+        )
+        print(
+            f"  {view.fqn}: {measures} measure(s), "
+            f"{len(view.fields) - measures} dimension(s), "
+            f"owner={view.owner or 'unknown'}{enrich}"
+        )
 
     for fqn, why in skipped:
         print(f"  SKIPPED {fqn}: {why}")
@@ -263,15 +271,19 @@ if CERTIFIED_CATALOG:
             "this is a systemic failure, not a per-view one"
         )
 
-    print(f"\n{len(certified_nodes)} certified node(s) and "
-          f"{len(certified_edges)} edge(s) ready to load.")
-    print("There is no loader in this example to reuse — step 3 is commented-out scaffolding — "
-          "so INSERT these into graph.nodes / graph.edges yourself (props as JSONB), then embed "
-          "each node with "
-          "graph_certified.embedding_text(node) — NOT its bare name. A question says "
-          "'how much did we make', not 'total_revenue', so the display name, description and "
-          "the curator's synonyms are what make the certified core reachable at all. Authority "
-          "ranking only re-orders nodes retrieval already found.")
+    print(
+        f"\n{len(certified_nodes)} certified node(s) and "
+        f"{len(certified_edges)} edge(s) ready to load."
+    )
+    print(
+        "There is no loader in this example to reuse — step 3 is commented-out scaffolding — "
+        "so INSERT these into graph.nodes / graph.edges yourself (props as JSONB), then embed "
+        "each node with "
+        "graph_certified.embedding_text(node) — NOT its bare name. A question says "
+        "'how much did we make', not 'total_revenue', so the display name, description and "
+        "the curator's synonyms are what make the certified core reachable at all. Authority "
+        "ranking only re-orders nodes retrieval already found."
+    )
 else:
     print("CERTIFIED_CATALOG is unset — skipping. Set it to a catalog containing a metric view.")
 

@@ -50,13 +50,25 @@ def check(name: str, got, want) -> None:
 
 # --- verbatim DESCRIBE EXTENDED shape (4 columns) --------------------------------------------
 DESCRIBE_ROWS = [
-    ["order_ID", "bigint", "Customer's order ID",
-     '{"display_name":"Order ID","synonyms":["Order ID","ID of Order"]}'],
-    ["ship_date", "date", "Ship date of order",
-     '{"display_name":"Ship Date","synonyms":["Shipping date","ship date"]}'],
-    ["total_revenue", "decimal(37,2) measure", "Total revenue after discounts",
-     '{"display_name":"Total Revenue ($)","synonyms":["Revenue","Total Revenue"]}'],
-    ["total_item_count", "bigint measure", "All total ordered item count", '{}'],
+    [
+        "order_ID",
+        "bigint",
+        "Customer's order ID",
+        '{"display_name":"Order ID","synonyms":["Order ID","ID of Order"]}',
+    ],
+    [
+        "ship_date",
+        "date",
+        "Ship date of order",
+        '{"display_name":"Ship Date","synonyms":["Shipping date","ship date"]}',
+    ],
+    [
+        "total_revenue",
+        "decimal(37,2) measure",
+        "Total revenue after discounts",
+        '{"display_name":"Total Revenue ($)","synonyms":["Revenue","Total Revenue"]}',
+    ],
+    ["total_item_count", "bigint measure", "All total ordered item count", "{}"],
     ["broken_meta", "string", "metadata is not JSON", "{not json"],
     ["", "", "", ""],
     ["# Detailed Table Information", "", "", ""],
@@ -82,51 +94,76 @@ class FakeReader:
 
 def main() -> int:
     print("== TEST 1: DESCRIBE parsing (the module's one brittle coupling) ==")
-    view = parse_describe(DESCRIBE_ROWS, "cchan_catalog", "metric_view_lab",
-                          "order_details_metric_view")
+    view = parse_describe(
+        DESCRIBE_ROWS, "cchan_catalog", "metric_view_lab", "order_details_metric_view"
+    )
     check("fqn is assembled", view.fqn, "cchan_catalog.metric_view_lab.order_details_metric_view")
     check("field count excludes the spacer and the metadata block", len(view.fields), 5)
-    check("owner is lifted from the metadata block", view.owner,
-          "chitra.chandrakumar@databricks.com")
+    check(
+        "owner is lifted from the metadata block", view.owner, "chitra.chandrakumar@databricks.com"
+    )
     check("created time is lifted", view.created_at, "Wed Dec 17 17:27:39 UTC 2025")
-    check("metadata keys did NOT leak in as fields",
-          [f.name for f in view.fields if f.name in ("Owner", "Catalog", "Type")], [])
+    check(
+        "metadata keys did NOT leak in as fields",
+        [f.name for f in view.fields if f.name in ("Owner", "Catalog", "Type")],
+        [],
+    )
 
     by_name = {f.name: f for f in view.fields}
     # the ' measure' suffix is the ONLY signal distinguishing a measure; information_schema
     # reports both as plain types, so this is the assertion that matters most in the file
     check("a measure is detected from the type suffix", by_name["total_revenue"].is_measure, True)
-    check("the suffix is stripped from the type", by_name["total_revenue"].data_type,
-          "decimal(37,2)")
+    check(
+        "the suffix is stripped from the type", by_name["total_revenue"].data_type, "decimal(37,2)"
+    )
     check("a dimension is not a measure", by_name["ship_date"].is_measure, False)
     check("dimension type is untouched", by_name["ship_date"].data_type, "date")
-    check("display_name is read from the metadata JSON", by_name["total_revenue"].display_name,
-          "Total Revenue ($)")
-    check("synonyms are read from the metadata JSON", list(by_name["ship_date"].synonyms),
-          ["Shipping date", "ship date"])
+    check(
+        "display_name is read from the metadata JSON",
+        by_name["total_revenue"].display_name,
+        "Total Revenue ($)",
+    )
+    check(
+        "synonyms are read from the metadata JSON",
+        list(by_name["ship_date"].synonyms),
+        ["Shipping date", "ship date"],
+    )
     check("empty metadata JSON is harmless", by_name["total_item_count"].display_name, "")
     # a curator's typo in the metadata must not cost us the field entirely
     check("MALFORMED metadata still yields the field", by_name["broken_meta"].name, "broken_meta")
-    check("malformed metadata degrades to no display_name",
-          by_name["broken_meta"].display_name, "")
-    check("malformed metadata keeps the measure flag correct",
-          by_name["broken_meta"].is_measure, False)
+    check("malformed metadata degrades to no display_name", by_name["broken_meta"].display_name, "")
+    check(
+        "malformed metadata keeps the measure flag correct",
+        by_name["broken_meta"].is_measure,
+        False,
+    )
 
     print("\n== TEST 1b: hostile and legacy DESCRIBE shapes ==")
     # a measure named "# Orders" is routine, and treating '#' alone as the metadata boundary
     # truncated the field list AND folded later fields into the metadata dict
     hashed = parse_describe(
-        [["ship_date", "date", "d", "{}"],
-         ["# Orders", "bigint measure", "count", "{}"],
-         ["total_revenue", "decimal(10,2) measure", "rev", "{}"],
-         ["", "", "", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "me@example.com", "", ""]],
-        "c", "s", "n")
-    check("a field named '# Orders' is not mistaken for the metadata boundary",
-          [f.name for f in hashed.fields], ["ship_date", "# Orders", "total_revenue"])
-    check("and it keeps its measure flag",
-          next(f.is_measure for f in hashed.fields if f.name == "# Orders"), True)
+        [
+            ["ship_date", "date", "d", "{}"],
+            ["# Orders", "bigint measure", "count", "{}"],
+            ["total_revenue", "decimal(10,2) measure", "rev", "{}"],
+            ["", "", "", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "me@example.com", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
+    check(
+        "a field named '# Orders' is not mistaken for the metadata boundary",
+        [f.name for f in hashed.fields],
+        ["ship_date", "# Orders", "total_revenue"],
+    )
+    check(
+        "and it keeps its measure flag",
+        next(f.is_measure for f in hashed.fields if f.name == "# Orders"),
+        True,
+    )
     check("the real boundary still ends the field block", hashed.owner, "me@example.com")
 
     # (a) A section AFTER the detail block must not overwrite metadata already read from it, and
@@ -134,28 +171,43 @@ def main() -> int:
     # CONSTRUCTED SHAPE: Spark folds storage keys into the detail block and emits no separate
     # '# Storage Information' section, so this pins the parser, not observed output.
     lat = parse_describe(
-        [["a", "int", "", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "real@example.com", "", ""], ["Comment", "the real comment", "", ""],
-         ["# Storage Information", "", "", ""],
-         ["Owner", "junk", "", ""], ["Comment", "a storage param", "", ""]],
-        "c", "s", "n")
+        [
+            ["a", "int", "", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "real@example.com", "", ""],
+            ["Comment", "the real comment", "", ""],
+            ["# Storage Information", "", "", ""],
+            ["Owner", "junk", "", ""],
+            ["Comment", "a storage param", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
     check("a later section does not overwrite the owner", lat.owner, "real@example.com")
     check("a later section does not overwrite the comment", lat.comment, "the real comment")
-    check("a later section's rows do not become certified fields",
-          [f.name for f in lat.fields], ["a"])
+    check(
+        "a later section's rows do not become certified fields", [f.name for f in lat.fields], ["a"]
+    )
     # A BLANK value in the real detail block must NOT be filled from a following section. This
     # assertion previously demanded the opposite, which locked in the bug: a metric view with no
     # description took its owner and comment from a '# Storage Information' block, and comment
     # feeds embedding_text(), so the node was embedded from a foreign section while still tagged
     # uc_certified. Views without a description are common, so this is the case that matters.
     blank = parse_describe(
-        [["a", "int", "", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "", "", ""], ["Comment", "", "", ""],
-         ["# Storage Information", "", "", ""],
-         ["Owner", "junk", "", ""], ["Comment", "a storage param", "", ""]],
-        "c", "s", "n")
+        [
+            ["a", "int", "", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "", "", ""],
+            ["Comment", "", "", ""],
+            ["# Storage Information", "", "", ""],
+            ["Owner", "junk", "", ""],
+            ["Comment", "a storage param", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
     check("a foreign section does not fill a blank owner", blank.owner, "")
     check("a foreign section does not fill a blank comment", blank.comment, "")
 
@@ -164,15 +216,23 @@ def main() -> int:
     # does not clear it. A bare '# col_name' with no preceding section header is the MAIN column
     # list, so the rows after it are fields — that is the intended reading, not a leak.
     part = parse_describe(
-        [["a", "int", "", ""],
-         ["# Partition Information", "", "", ""],
-         ["# col_name", "data_type", "comment", ""],
-         ["p", "string", "partition col", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "me@example.com", "", ""]],
-        "c", "s", "n")
-    check("a partition-column block is skipped, not emitted as certified fields",
-          [f.name for f in part.fields], ["a"])
+        [
+            ["a", "int", "", ""],
+            ["# Partition Information", "", "", ""],
+            ["# col_name", "data_type", "comment", ""],
+            ["p", "string", "partition col", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "me@example.com", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
+    check(
+        "a partition-column block is skipped, not emitted as certified fields",
+        [f.name for f in part.fields],
+        ["a"],
+    )
 
     # KNOWN LIMIT OF THE NON-LATCHING BOUNDARY, pinned rather than argued. A '#'-prefixed row
     # with an EMPTY second cell INSIDE the detail block satisfies _is_section_header, so it ends
@@ -183,171 +243,273 @@ def main() -> int:
     # inherited from '# Storage Information' and embedded as uc_certified is not, which is why
     # the trade-off went this way. Flip this assertion if a real DESCRIBE ever emits the shape.
     interior = parse_describe(
-        [["a", "int", "", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "me@example.com", "", ""],
-         ["# some interior marker", "", "", ""],
-         ["Comment", "dropped because the marker ended the block", "", ""]],
-        "c", "s", "n")
-    check("an interior '#' marker ends the detail block: the owner before it survives",
-          interior.owner, "me@example.com")
-    check("...and the comment after it is LOST, not filled from elsewhere",
-          interior.comment, "")
+        [
+            ["a", "int", "", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "me@example.com", "", ""],
+            ["# some interior marker", "", "", ""],
+            ["Comment", "dropped because the marker ended the block", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
+    check(
+        "an interior '#' marker ends the detail block: the owner before it survives",
+        interior.owner,
+        "me@example.com",
+    )
+    check("...and the comment after it is LOST, not filled from elsewhere", interior.comment, "")
 
     # (b) The '# col_name' sub-header is structural in every rendering, and — checked before the
     # section-header test — an EMPTY type cell no longer swallows the whole field block.
-    for variant, label in [("data_type", "exact"), ("DATA_TYPE", "upper"),
-                           ("`data_type`", "backquoted"), ('"data_type"', "quoted"),
-                           ("data type", "spaced"), ("tipo_dato", "localized type"),
-                           ("", "EMPTY type cell")]:
+    for variant, label in [
+        ("data_type", "exact"),
+        ("DATA_TYPE", "upper"),
+        ("`data_type`", "backquoted"),
+        ('"data_type"', "quoted"),
+        ("data type", "spaced"),
+        ("tipo_dato", "localized type"),
+        ("", "EMPTY type cell"),
+    ]:
         v = parse_describe(
-            [["# col_name", variant, "comment", ""],
-             ["ship_date", "date", "d", "{}"],
-             ["# Orders", "bigint measure", "count", "{}"],
-             ["# Detailed Table Information", "", "", ""],
-             ["Owner", "me@example.com", "", ""]],
-            "c", "s", "n")
-        check(f"sub-header ({label}) is structural, field block intact",
-              [f.name for f in v.fields], ["ship_date", "# Orders"])
-        check(f"...and '# Orders' keeps its measure flag ({label})",
-              next((f.is_measure for f in v.fields if f.name == "# Orders"), None), True)
+            [
+                ["# col_name", variant, "comment", ""],
+                ["ship_date", "date", "d", "{}"],
+                ["# Orders", "bigint measure", "count", "{}"],
+                ["# Detailed Table Information", "", "", ""],
+                ["Owner", "me@example.com", "", ""],
+            ],
+            "c",
+            "s",
+            "n",
+        )
+        check(
+            f"sub-header ({label}) is structural, field block intact",
+            [f.name for f in v.fields],
+            ["ship_date", "# Orders"],
+        )
+        check(
+            f"...and '# Orders' keeps its measure flag ({label})",
+            next((f.is_measure for f in v.fields if f.name == "# Orders"), None),
+            True,
+        )
 
     # (c) enrichment_available reports CONTENT, not row width: an uncurated 4-column view is the
     # common real case and row-width checking would call it enriched.
     boundary_row = ["# Detailed Table Information", "", "", ""]
     owner_row = ["Owner", "me@x.com", "", ""]
-    def enrich_of(first_row):
-        return parse_describe([first_row, boundary_row, owner_row],
-                              "c", "s", "n").enrichment_available
 
-    check("4-column with empty metadata reports enrichment UNavailable",
-          enrich_of(["a", "date", "d", "{}"]), False)
-    check("4-column with a real display_name reports enrichment available",
-          enrich_of(["a", "date", "d", '{"display_name": "Ship date"}']), True)
-    check("3-column DESCRIBE reports enrichment UNavailable",
-          enrich_of(["a", "date", "d"]), False)
+    def enrich_of(first_row):
+        return parse_describe(
+            [first_row, boundary_row, owner_row], "c", "s", "n"
+        ).enrichment_available
+
+    check(
+        "4-column with empty metadata reports enrichment UNavailable",
+        enrich_of(["a", "date", "d", "{}"]),
+        False,
+    )
+    check(
+        "4-column with a real display_name reports enrichment available",
+        enrich_of(["a", "date", "d", '{"display_name": "Ship date"}']),
+        True,
+    )
+    check("3-column DESCRIBE reports enrichment UNavailable", enrich_of(["a", "date", "d"]), False)
 
     # A 3-column DESCRIBE EXTENDED (older DBR): enrichment degrades, it does not raise. NOT the
     # plain-DESCRIBE shape — that emits no detail block at all and now raises, by design.
-    three = parse_describe([["total_revenue", "decimal(10,2) measure", "rev"],
-                            ["# Detailed Table Information", "", ""]], "c", "s", "n")
+    three = parse_describe(
+        [
+            ["total_revenue", "decimal(10,2) measure", "rev"],
+            ["# Detailed Table Information", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
     check("a 3-column DESCRIBE still yields the field", len(three.fields), 1)
     check("...and keeps the measure flag", three.fields[0].is_measure, True)
     check("...with enrichment simply absent", three.fields[0].display_name, "")
     # 2-column rows: the boundary row is still required, and a 2-column boundary must work
-    check("a 2-column row does not raise",
-          len(parse_describe([["f", "int"], ["# Detailed Table Information", ""]],
-                             "c", "s", "n").fields), 1)
+    check(
+        "a 2-column row does not raise",
+        len(
+            parse_describe(
+                [["f", "int"], ["# Detailed Table Information", ""]], "c", "s", "n"
+            ).fields
+        ),
+        1,
+    )
 
     # metadata that is valid JSON but the wrong type
     for bad_meta in ("[1,2]", '"a string"', "123", "null"):
         got = parse_describe([["f", "int", "c", bad_meta], BOUNDARY], "c", "s", "n").fields[0]
         check(f"metadata {bad_meta!r} degrades safely", (got.display_name, got.synonyms), ("", ()))
-    nonlist = parse_describe([["f", "int", "c", '{"synonyms":"notalist"}'], BOUNDARY],
-                             "c", "s", "n")
+    nonlist = parse_describe(
+        [["f", "int", "c", '{"synonyms":"notalist"}'], BOUNDARY], "c", "s", "n"
+    )
     check("a non-list synonyms value is ignored", nonlist.fields[0].synonyms, ())
-    dirty = parse_describe([["f", "int", "c", '{"synonyms":[null,5,{"a":1},"real",""]}'],
-                            BOUNDARY], "c", "s", "n")
+    dirty = parse_describe(
+        [["f", "int", "c", '{"synonyms":[null,5,{"a":1},"real",""]}'], BOUNDARY], "c", "s", "n"
+    )
     check("non-string synonym elements are dropped", dirty.fields[0].synonyms, ("real",))
 
     # a DIFFERENT '# ...' section must be skipped, not treated as the boundary: latching there
     # drops every field after it. This pins the empty-data_type discriminator from the second
     # side — without it, reverting the fix to `col == _DETAIL_BOUNDARY` alone stays green.
     sectioned = parse_describe(
-        [["a", "int", "", ""],
-         ["# Partition Information", "", "", ""],
-         ["p", "string", "", ""],
-         ["# Metadata Columns", "", "", ""],
-         ["q", "int", "", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "me@example.com", "", ""]],
-        "c", "s", "n")
+        [
+            ["a", "int", "", ""],
+            ["# Partition Information", "", "", ""],
+            ["p", "string", "", ""],
+            ["# Metadata Columns", "", "", ""],
+            ["q", "int", "", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "me@example.com", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
     # absurd but it pins the clause: even a FIELD named exactly like the boundary is a field,
     # because it carries a data_type. Without `and not data_type` this row ends the field list.
     impostor = parse_describe(
-        [["# Detailed Table Information", "bigint measure", "a field, not a header", "{}"],
-         ["real_field", "int", "", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "me@example.com", "", ""]],
-        "c", "s", "n")
-    check("a FIELD named like the boundary is still a field (it has a data_type)",
-          [f.name for f in impostor.fields],
-          ["# Detailed Table Information", "real_field"])
-    check("...and the real (typeless) boundary still ends the block", impostor.owner,
-          "me@example.com")
+        [
+            ["# Detailed Table Information", "bigint measure", "a field, not a header", "{}"],
+            ["real_field", "int", "", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "me@example.com", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
+    check(
+        "a FIELD named like the boundary is still a field (it has a data_type)",
+        [f.name for f in impostor.fields],
+        ["# Detailed Table Information", "real_field"],
+    )
+    check(
+        "...and the real (typeless) boundary still ends the block", impostor.owner, "me@example.com"
+    )
 
     # the REAL Spark shape: a section header is followed by a bare '# col_name | data_type |
     # comment' SUB-HEADER whose data_type is NOT empty, then body rows. Skipping only the header
     # left both being read as fields — measured, that emitted `dimension:<fqn>.# col_name` with
     # data_type "data_type", plus every partition column, all tagged certified and boosted.
     spark_shape = parse_describe(
-        [["a", "int", "", ""],
-         ["# Partition Information", "", "", ""],
-         ["# col_name", "data_type", "comment", ""],
-         ["region", "string", "", ""],
-         ["# Metadata Columns", "", "", ""],
-         ["_metadata", "struct", "", ""],
-         ["# Detailed Table Information", "", "", ""],
-         ["Owner", "me@example.com", "", ""]],
-        "c", "s", "n")
-    check("a section's SUB-HEADER and BODY are not read as fields",
-          [f.name for f in spark_shape.fields], ["a"])
+        [
+            ["a", "int", "", ""],
+            ["# Partition Information", "", "", ""],
+            ["# col_name", "data_type", "comment", ""],
+            ["region", "string", "", ""],
+            ["# Metadata Columns", "", "", ""],
+            ["_metadata", "struct", "", ""],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "me@example.com", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
+    check(
+        "a section's SUB-HEADER and BODY are not read as fields",
+        [f.name for f in spark_shape.fields],
+        ["a"],
+    )
     check("...and the detail block is still reached", spark_shape.owner, "me@example.com")
 
     # uppercase MEASURE: the one signal that matters must not degrade silently
-    upper = parse_describe([["m", "BIGINT MEASURE", "", ""], BOUNDARY, ["Owner", "x", "", ""]],
-                           "c", "s", "n")
+    upper = parse_describe(
+        [["m", "BIGINT MEASURE", "", ""], BOUNDARY, ["Owner", "x", "", ""]], "c", "s", "n"
+    )
     check("the measure suffix match is case-insensitive", upper.fields[0].is_measure, True)
 
     # non-string display_name stringified a Python repr into the node name
-    nonstr = parse_describe([["r", "int", "c", '{"display_name":{"a":1}}'], BOUNDARY,
-                             ["Owner", "x", "", ""]], "c", "s", "n")
+    nonstr = parse_describe(
+        [["r", "int", "c", '{"display_name":{"a":1}}'], BOUNDARY, ["Owner", "x", "", ""]],
+        "c",
+        "s",
+        "n",
+    )
     check("a non-string display_name is ignored, not repr'd", nonstr.fields[0].display_name, "")
 
     # a typeless row that is not a '#' header is not a field by this module's own discriminator
-    ghost = parse_describe([["good", "int", "", ""], ["ghost", "", "", ""], BOUNDARY,
-                            ["Owner", "x", "", ""]], "c", "s", "n")
-    check("a typeless non-header row is not emitted as a field",
-          [f.name for f in ghost.fields], ["good"])
+    ghost = parse_describe(
+        [["good", "int", "", ""], ["ghost", "", "", ""], BOUNDARY, ["Owner", "x", "", ""]],
+        "c",
+        "s",
+        "n",
+    )
+    check(
+        "a typeless non-header row is not emitted as a field",
+        [f.name for f in ghost.fields],
+        ["good"],
+    )
 
     # the view node had only its name to embed, because Comment was never lifted
     with_comment = parse_describe(
-        [["r", "int", "c", "{}"], BOUNDARY,
-         ["Comment", "Order-level revenue metrics", "", ""], ["Owner", "x", "", ""]],
-        "c", "s", "order_details")
-    check("the metric view's own Comment is lifted", with_comment.comment,
-          "Order-level revenue metrics")
-    check("so a MetricView node embeds more than its bare name",
-          embedding_text(certified_rows(with_comment).nodes[0]),
-          "order_details Order-level revenue metrics")
+        [
+            ["r", "int", "c", "{}"],
+            BOUNDARY,
+            ["Comment", "Order-level revenue metrics", "", ""],
+            ["Owner", "x", "", ""],
+        ],
+        "c",
+        "s",
+        "order_details",
+    )
+    check(
+        "the metric view's own Comment is lifted",
+        with_comment.comment,
+        "Order-level revenue metrics",
+    )
+    check(
+        "so a MetricView node embeds more than its bare name",
+        embedding_text(certified_rows(with_comment).nodes[0]),
+        "order_details Order-level revenue metrics",
+    )
 
     # This previously asserted ["a","p","q"] — i.e. that fields AFTER a section header survive.
     # That was the wrong contract: rows after a section header belong to that section, not to the
     # field list, which is why the sub-header and partition columns were leaking in as certified
     # fields. The field block ends at the FIRST section header.
-    check("the field block ends at the first section header",
-          [f.name for f in sectioned.fields], ["a"])
+    check(
+        "the field block ends at the first section header",
+        [f.name for f in sectioned.fields],
+        ["a"],
+    )
     check("...and the detail block is still reached", sectioned.owner, "me@example.com")
 
     # a missing boundary must RAISE: otherwise 'Owner' becomes a dimension node whose data_type
     # is an email address, tagged uc_certified and therefore boosted as authoritative
     raised = False
     try:
-        parse_describe([["Owner", "real@example.com", "", ""], ["Type", "METRIC_VIEW", "", ""]],
-                       "c", "s", "n")
+        parse_describe(
+            [["Owner", "real@example.com", "", ""], ["Type", "METRIC_VIEW", "", ""]], "c", "s", "n"
+        )
     except ValueError:
         raised = True
-    check("a DESCRIBE with no boundary raises rather than emitting metadata as fields",
-          raised, True)
+    check(
+        "a DESCRIBE with no boundary raises rather than emitting metadata as fields", raised, True
+    )
 
     # ...and a SECTION is not the boundary. If _is_detail_boundary matched any '# ...' header,
     # '# Partition Information' would satisfy the guard above, so output with sections but no
     # detail block would parse — losing Owner/Created Time silently and defeating the check.
     section_only = False
     try:
-        parse_describe([["a", "int", "", ""],
-                        ["# Partition Information", "", "", ""],
-                        ["region", "string", "", ""]], "c", "s", "n")
+        parse_describe(
+            [
+                ["a", "int", "", ""],
+                ["# Partition Information", "", "", ""],
+                ["region", "string", "", ""],
+            ],
+            "c",
+            "s",
+            "n",
+        )
     except ValueError:
         section_only = True
     check("a section header does not satisfy the boundary requirement", section_only, True)
@@ -355,47 +517,84 @@ def main() -> int:
     # duplicate names would collide on graph.nodes' PK and on edges' (src,dst,rel) PK
     dup_raised = False
     try:
-        parse_describe([["amount", "int", "", ""], ["amount", "bigint", "", ""],
-                        ["# Detailed Table Information", "", "", ""]], "c", "s", "n")
+        parse_describe(
+            [
+                ["amount", "int", "", ""],
+                ["amount", "bigint", "", ""],
+                ["# Detailed Table Information", "", "", ""],
+            ],
+            "c",
+            "s",
+            "n",
+        )
     except ValueError:
         dup_raised = True
-    check("duplicate field names raise rather than producing duplicate primary keys",
-          dup_raised, True)
+    check(
+        "duplicate field names raise rather than producing duplicate primary keys", dup_raised, True
+    )
 
     # non-string cells: SqlReader advertises the SQL connector and Statement Execution API,
     # which return typed values, so .strip() on an int must not blow up
-    typed = parse_describe([[123, 456, None, None],
-                            ["# Detailed Table Information", "", "", ""],
-                            ["Owner", "x", "", ""]], "c", "s", "n")
+    typed = parse_describe(
+        [
+            [123, 456, None, None],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "x", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
     check("non-string cells coerce instead of raising", typed.fields[0].data_type, "456")
 
     # a whitespace-only display_name must not replace the real column name
-    ws = parse_describe([["rev", "int", "c", '{"display_name":"   "}'],
-                         ["# Detailed Table Information", "", "", ""],
-                         ["Owner", "x", "", ""]], "c", "s", "n")
+    ws = parse_describe(
+        [
+            ["rev", "int", "c", '{"display_name":"   "}'],
+            ["# Detailed Table Information", "", "", ""],
+            ["Owner", "x", "", ""],
+        ],
+        "c",
+        "s",
+        "n",
+    )
     ws_node = certified_rows(ws).nodes[1]
     check("a whitespace-only display_name falls back to the column name", ws_node["name"], "rev")
-    check("the raw column name is recoverable from props, not just node_id",
-          ws_node["props"].get("field_name"), "rev")
+    check(
+        "the raw column name is recoverable from props, not just node_id",
+        ws_node["props"].get("field_name"),
+        "rev",
+    )
 
     print("\n== TEST 2: discovery filters Genie/Lakeview internals ==")
-    check("internal prefix is recognised",
-          is_internal_catalog("__databricks_internal_catalog_lakeview_1444828305810485"), True)
+    check(
+        "internal prefix is recognised",
+        is_internal_catalog("__databricks_internal_catalog_lakeview_1444828305810485"),
+        True,
+    )
     check("a user catalog is not internal", is_internal_catalog("cchan_catalog"), False)
     reader = FakeReader(
-        [["cchan_catalog", "metric_view_lab", "order_details_metric_view"],
-         ["__databricks_internal_catalog_lakeview_144", "abc", "lakegenie_01f158"],
-         ["another_catalog", "sales", "revenue_mv"]],
+        [
+            ["cchan_catalog", "metric_view_lab", "order_details_metric_view"],
+            ["__databricks_internal_catalog_lakeview_144", "abc", "lakegenie_01f158"],
+            ["another_catalog", "sales", "revenue_mv"],
+        ],
         DESCRIBE_ROWS,
     )
     found = discover_metric_views(reader)
-    check("internal metric views are dropped", [c for c, _, _ in found],
-          ["cchan_catalog", "another_catalog"])
+    check(
+        "internal metric views are dropped",
+        [c for c, _, _ in found],
+        ["cchan_catalog", "another_catalog"],
+    )
     check("discovery filters on table_type", "table_type = 'METRIC_VIEW'" in reader.seen[0], True)
     check("discovery orders its results", "ORDER BY" in reader.seen[0], True)
     # startswith, not substring: a user catalog named x__databricks_internal_y is legitimate
-    check("the internal filter matches a PREFIX, not a substring",
-          is_internal_catalog("x__databricks_internal_y"), False)
+    check(
+        "the internal filter matches a PREFIX, not a substring",
+        is_internal_catalog("x__databricks_internal_y"),
+        False,
+    )
     scoped = FakeReader([["c", "s", "n"]], DESCRIBE_ROWS)
     discover_metric_views(scoped, catalog="my_cat")
     check("a catalog scope reaches the query", "table_catalog = 'my_cat'" in scoped.seen[0], True)
@@ -420,8 +619,7 @@ def main() -> int:
     check("an empty catalog is rejected, not silently unscoped", empty_rejected, True)
     unscoped = FakeReader([], DESCRIBE_ROWS)
     discover_metric_views(unscoped, catalog=None)
-    check("catalog=None is unscoped by design",
-          "table_catalog = " in unscoped.seen[0], False)
+    check("catalog=None is unscoped by design", "table_catalog = " in unscoped.seen[0], False)
 
     for ok_name in ("my_catalog", "cchan_catalog", "a-b_1"):
         accepted = True
@@ -436,10 +634,16 @@ def main() -> int:
     check("one node for the view plus one per field", len(rows.nodes), 6)
     check("one edge per field", len(rows.edges), 5)
     # the contract with sql/graphrag_retrieval.sql: without this the nodes rank as inferred
-    check("EVERY node carries the certified marker",
-          {n["props"]["source_method"] for n in rows.nodes}, {CERTIFIED_SOURCE_METHOD})
-    check("every edge carries it too",
-          {e["props"]["source_method"] for e in rows.edges}, {CERTIFIED_SOURCE_METHOD})
+    check(
+        "EVERY node carries the certified marker",
+        {n["props"]["source_method"] for n in rows.nodes},
+        {CERTIFIED_SOURCE_METHOD},
+    )
+    check(
+        "every edge carries it too",
+        {e["props"]["source_method"] for e in rows.edges},
+        {CERTIFIED_SOURCE_METHOD},
+    )
     # Per field, NOT set-membership over {Measure, Dimension}: a wholesale swap of the two is
     # invisible to a set assertion, and this mapping is the module's entire reason for existing.
     by_id = {n["node_id"]: n for n in rows.nodes}
@@ -448,90 +652,148 @@ def main() -> int:
     # LITERALS, not the imported constants: comparing a value against the constant that produced
     # it is a tautology, so swapping MEASURE_NODE_TYPE and DIMENSION_NODE_TYPE's values (or
     # renaming VIEW_NODE_TYPE) stayed green while the docs kept documenting the old names.
-    check("a measure becomes a Measure node", (by_id.get(rev_id) or {}).get("node_type"),
-          "Measure")
-    check("a dimension becomes a Dimension node", (by_id.get(ship_id) or {}).get("node_type"),
-          "Dimension")
-    check("the view node type is literally MetricView",
-          (by_id.get(node_id_for_view(view)) or {}).get("node_type"), "MetricView")
+    check("a measure becomes a Measure node", (by_id.get(rev_id) or {}).get("node_type"), "Measure")
+    check(
+        "a dimension becomes a Dimension node",
+        (by_id.get(ship_id) or {}).get("node_type"),
+        "Dimension",
+    )
+    check(
+        "the view node type is literally MetricView",
+        (by_id.get(node_id_for_view(view)) or {}).get("node_type"),
+        "MetricView",
+    )
     # keyed by dst_id, which only works while edges point view -> field. Use .get so a
     # direction regression reports as a failed check rather than a KeyError traceback.
     edge_for = {e["dst_id"]: e for e in rows.edges}
     check("a measure edge is HAS_MEASURE", (edge_for.get(rev_id) or {}).get("rel"), HAS_MEASURE)
-    check("a dimension edge is HAS_DIMENSION", (edge_for.get(ship_id) or {}).get("rel"),
-          HAS_DIMENSION)
+    check(
+        "a dimension edge is HAS_DIMENSION", (edge_for.get(ship_id) or {}).get("rel"), HAS_DIMENSION
+    )
     # direction is asserted because README/mdx and the ASCII diagram all promise view -> field
-    check("edges point view -> field, not the reverse",
-          (edge_for.get(rev_id) or {}).get("src_id"), node_id_for_view(view))
+    check(
+        "edges point view -> field, not the reverse",
+        (edge_for.get(rev_id) or {}).get("src_id"),
+        node_id_for_view(view),
+    )
 
     # The LITERAL value, once. Comparing against the imported constant is a tautology: rename the
     # constant to a typo and the suite stays green while sql/graphrag_retrieval.sql and
     # graph_retrieve.py keep hardcoding 'uc_certified', so the nodes land and rank as inferred —
     # the exact silent no-op the module docstring warns about.
-    check("the certified marker is literally 'uc_certified'",
-          ((by_id.get(rev_id) or {}).get("props") or {}).get("source_method"), "uc_certified")
-    check("the relation literals are HAS_MEASURE / HAS_DIMENSION",
-          ((edge_for.get(rev_id) or {}).get("rel"), (edge_for.get(ship_id) or {}).get("rel")),
-          ("HAS_MEASURE", "HAS_DIMENSION"))
+    check(
+        "the certified marker is literally 'uc_certified'",
+        ((by_id.get(rev_id) or {}).get("props") or {}).get("source_method"),
+        "uc_certified",
+    )
+    check(
+        "the relation literals are HAS_MEASURE / HAS_DIMENSION",
+        ((edge_for.get(rev_id) or {}).get("rel"), (edge_for.get(ship_id) or {}).get("rel")),
+        ("HAS_MEASURE", "HAS_DIMENSION"),
+    )
     # both ride into gold_triplets' 8-column contract, so a wrong value ships downstream
-    check("source_agent is set on nodes and edges",
-          (((by_id.get(rev_id) or {}).get("props") or {}).get("source_agent"),
-           ((edge_for.get(rev_id) or {}).get("props") or {}).get("source_agent")),
-          ("uc-certified-core", "uc-certified-core"))
-    check("curated edges carry confidence 1.0",
-          ((edge_for.get(rev_id) or {}).get("props") or {}).get("confidence"), 1.0)
+    check(
+        "source_agent is set on nodes and edges",
+        (
+            ((by_id.get(rev_id) or {}).get("props") or {}).get("source_agent"),
+            ((edge_for.get(rev_id) or {}).get("props") or {}).get("source_agent"),
+        ),
+        ("uc-certified-core", "uc-certified-core"),
+    )
+    check(
+        "curated edges carry confidence 1.0",
+        ((edge_for.get(rev_id) or {}).get("props") or {}).get("confidence"),
+        1.0,
+    )
     view_node = next(n for n in rows.nodes if n["node_type"] == VIEW_NODE_TYPE)
-    check("authority metadata rides on the view node",
-          (view_node.get("props") or {}).get("owner"), "chitra.chandrakumar@databricks.com")
+    check(
+        "authority metadata rides on the view node",
+        (view_node.get("props") or {}).get("owner"),
+        "chitra.chandrakumar@databricks.com",
+    )
     # these three ride into gold_triplets / are the reason DESCRIBE is mandatory, and all three
     # previously survived removal
-    check("a field node carries its metric_view back-reference",
-          ((by_id.get(rev_id) or {}).get("props") or {}).get("metric_view"),
-          "cchan_catalog.metric_view_lab.order_details_metric_view")
-    check("a field node carries its data_type",
-          ((by_id.get(rev_id) or {}).get("props") or {}).get("data_type"), "decimal(37,2)")
-    check("a field node carries its comment when present",
-          ((by_id.get(rev_id) or {}).get("props") or {}).get("comment"),
-          "Total revenue after discounts")
-    check("the view node id carries the metricview: prefix", node_id_for_view(view),
-          "metricview:cchan_catalog.metric_view_lab.order_details_metric_view")
-    check("node ids are namespaced and stable",
-          sorted(n["node_id"] for n in rows.nodes)[0],
-          "dimension:cchan_catalog.metric_view_lab.order_details_metric_view.broken_meta")
+    check(
+        "a field node carries its metric_view back-reference",
+        ((by_id.get(rev_id) or {}).get("props") or {}).get("metric_view"),
+        "cchan_catalog.metric_view_lab.order_details_metric_view",
+    )
+    check(
+        "a field node carries its data_type",
+        ((by_id.get(rev_id) or {}).get("props") or {}).get("data_type"),
+        "decimal(37,2)",
+    )
+    check(
+        "a field node carries its comment when present",
+        ((by_id.get(rev_id) or {}).get("props") or {}).get("comment"),
+        "Total revenue after discounts",
+    )
+    check(
+        "the view node id carries the metricview: prefix",
+        node_id_for_view(view),
+        "metricview:cchan_catalog.metric_view_lab.order_details_metric_view",
+    )
+    check(
+        "node ids are namespaced and stable",
+        sorted(n["node_id"] for n in rows.nodes)[0],
+        "dimension:cchan_catalog.metric_view_lab.order_details_metric_view.broken_meta",
+    )
     rev = next(n for n in rows.nodes if n["node_id"].endswith(".total_revenue"))
     check("a field node prefers the curator's display name", rev["name"], "Total Revenue ($)")
-    check("a field with no display_name falls back to its column name",
-          next(n for n in rows.nodes if n["node_id"].endswith(".total_item_count"))["name"],
-          "total_item_count")
+    check(
+        "a field with no display_name falls back to its column name",
+        next(n for n in rows.nodes if n["node_id"].endswith(".total_item_count"))["name"],
+        "total_item_count",
+    )
     # absent metadata must be absent, not an empty string that reads as "known to be blank"
-    bare = parse_describe([["x", "int", "", ""], ["# Detailed Table Information", "", "", ""]],
-                          "c", "s", "n")
-    check("no owner means no owner key at all",
-          "owner" in certified_rows(bare).nodes[0]["props"], False)
-    check("no created time means no created_at key either",
-          "created_at" in certified_rows(bare).nodes[0]["props"], False)
-    check("...but a present created_at IS carried",
-          certified_rows(view).nodes[0]["props"].get("created_at"),
-          "Wed Dec 17 17:27:39 UTC 2025")
+    bare = parse_describe(
+        [["x", "int", "", ""], ["# Detailed Table Information", "", "", ""]], "c", "s", "n"
+    )
+    check(
+        "no owner means no owner key at all",
+        "owner" in certified_rows(bare).nodes[0]["props"],
+        False,
+    )
+    check(
+        "no created time means no created_at key either",
+        "created_at" in certified_rows(bare).nodes[0]["props"],
+        False,
+    )
+    check(
+        "...but a present created_at IS carried",
+        certified_rows(view).nodes[0]["props"].get("created_at"),
+        "Wed Dec 17 17:27:39 UTC 2025",
+    )
 
     print("\n== TEST 4: embedding text (reachability of the certified core) ==")
     # authority ranking only ever RE-ORDERS nodes retrieval already reached, so a certified node
     # that no question can match is invisible no matter how high the boost
-    check("embedding text includes name, comment and synonyms",
-          embedding_text(rev),
-          "Total Revenue ($) Total revenue after discounts Revenue Total Revenue")
-    check("embedding text of a bare node is just its name",
-          embedding_text({"name": "x", "props": {}}), "x")
+    check(
+        "embedding text includes name, comment and synonyms",
+        embedding_text(rev),
+        "Total Revenue ($) Total revenue after discounts Revenue Total Revenue",
+    )
+    check(
+        "embedding text of a bare node is just its name",
+        embedding_text({"name": "x", "props": {}}),
+        "x",
+    )
 
     print("\n== TEST 5: read_metric_view wires discovery to parsing ==")
     r2 = FakeReader([], DESCRIBE_ROWS)
     v2 = read_metric_view(r2, "cchan_catalog", "metric_view_lab", "order_details_metric_view")
-    check("identifiers are backtick-quoted in DESCRIBE",
-          "`cchan_catalog`.`metric_view_lab`.`order_details_metric_view`" in r2.seen[0], True)
+    check(
+        "identifiers are backtick-quoted in DESCRIBE",
+        "`cchan_catalog`.`metric_view_lab`.`order_details_metric_view`" in r2.seen[0],
+        True,
+    )
     # plain DESCRIBE returns no 4th metadata column and no metadata block, so display_name,
     # synonyms, Owner and Created Time would all silently vanish
-    check("it is DESCRIBE EXTENDED, not plain DESCRIBE",
-          r2.seen[0].startswith("DESCRIBE EXTENDED "), True)
+    check(
+        "it is DESCRIBE EXTENDED, not plain DESCRIBE",
+        r2.seen[0].startswith("DESCRIBE EXTENDED "),
+        True,
+    )
     # backticks are NOT a safety boundary: Spark escapes one by doubling it, so a name holding a
     # backtick breaks out. All three identifiers are validated, not just the catalog.
     for part in ("n` ; DROP TABLE graph.nodes -- ", "x' OR true --", "a b"):

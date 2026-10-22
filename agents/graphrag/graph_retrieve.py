@@ -7,6 +7,7 @@ Lakebase via pgvector HNSW + recursive CTE; this module reproduces the SAME algo
 (cosine seed -> k-hop expansion both directions -> blended seed_sim * 0.5^hop score) so
 behavior matches and is verifiable without infra.
 """
+
 from __future__ import annotations
 
 import math
@@ -19,8 +20,17 @@ def cosine(a, b) -> float:
     return dot / (na * nb)
 
 
-def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, limit=25,
-             seed_floor=-1.0, authority_boost=1.0):
+def retrieve(
+    query_embedding,
+    nodes,
+    edges,
+    embeddings,
+    seed_k=2,
+    max_hops=2,
+    limit=25,
+    seed_floor=-1.0,
+    authority_boost=1.0,
+):
     """Mirror of graphrag_retrieval.sql.
 
     Args:
@@ -58,7 +68,8 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
             for nid, emb in embeddings.items()
             if any(emb) and (sim := cosine(query_embedding, emb)) >= seed_floor
         ),
-        key=lambda x: x[1], reverse=True,
+        key=lambda x: x[1],
+        reverse=True,
     )[:seed_k]
 
     # undirected adjacency (both directions), mirrors the `adj` CTE
@@ -68,13 +79,13 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
         adj.setdefault(d, []).append((s, r))
 
     # 2) bounded k-hop walk with per-path cycle guard
-    best: dict = {}          # node_id -> best graph_score
-    nearest: dict = {}       # node_id -> min hop
-    rels: dict = {}          # node_id -> set of via rels
+    best: dict = {}  # node_id -> best graph_score
+    nearest: dict = {}  # node_id -> min hop
+    rels: dict = {}  # node_id -> set of via rels
     frontier: list = [(nid, 0, sim, (nid,)) for nid, sim in sims]
     while frontier:
         nid, hop, seed_sim, visited = frontier.pop()
-        score = seed_sim * (0.5 ** hop)
+        score = seed_sim * (0.5**hop)
         if nid not in best or score > best[nid]:
             best[nid] = score
         if nid not in nearest or hop < nearest[nid]:
@@ -130,17 +141,19 @@ def retrieve(query_embedding, nodes, edges, embeddings, seed_k=2, max_hops=2, li
         source_class = "inferred" if raw is None else raw
         weight = boost if (source_class == "uc_certified" and score > 0) else 1.0
         rank_key = score * weight
-        out.append({
-            "node_id": nid,
-            "node_type": n["node_type"],
-            "name": n["name"],
-            "nearest_hop": nearest[nid],
-            "rels": sorted(rels.get(nid, [])),
-            "score": round(score, 4),
-            "source_class": source_class,
-            "authority_score": round(rank_key, 4),
-            "_rank_key": rank_key,
-        })
+        out.append(
+            {
+                "node_id": nid,
+                "node_type": n["node_type"],
+                "name": n["name"],
+                "nearest_hop": nearest[nid],
+                "rels": sorted(rels.get(nid, [])),
+                "score": round(score, 4),
+                "source_class": source_class,
+                "authority_score": round(rank_key, 4),
+                "_rank_key": rank_key,
+            }
+        )
     # Tie broken on node_id for determinism; a boost makes exact ties likelier than the raw
     # scores did. NOTE Postgres orders TEXT by database collation while this compares Unicode
     # codepoints, so the halves agree only under C collation — matters for ids differing in
