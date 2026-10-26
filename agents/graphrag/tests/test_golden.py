@@ -260,6 +260,8 @@ def test_without_uniqueness_the_triangle_has_24_walks(films):
         "MATCH (a), (b {ref: a}) RETURN b",  # map values are literals or parameters, as in Cypher
         "MATCH (a)-[:KNOWS {since: b.born}]->(b) RETURN a",
         "MATCH (a)-[b]->(b) RETURN a",
+        "MATCH (a)-[r]->(b), (r)-->(c) RETURN c",  # a relationship reused as a node
+        "MATCH (a)-[p*1..2]->(b), (p)-->(c) RETURN c",  # a path reused as a node
         "MATCH (a) WHERE a.name = 'x\\u0000' RETURN a",  # jsonb cannot hold NUL
         "MATCH (a) RETURN a LIMIT 99999999999999999999",
     ],
