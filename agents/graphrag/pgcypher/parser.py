@@ -142,6 +142,19 @@ _TOKEN = re.compile(
     re.VERBOSE,
 )
 
+_UNSUPPORTED = {
+    "OPTIONAL",
+    "UNWIND",
+    "CREATE",
+    "MERGE",
+    "SET",
+    "DELETE",
+    "DETACH",
+    "REMOVE",
+    "CALL",
+    "UNION",
+    "XOR",
+}
 _KEYWORDS = {
     "MATCH",
     "WHERE",
@@ -168,31 +181,7 @@ _KEYWORDS = {
     "WITH",
     "CONTAINS",
     "IN",
-    "OPTIONAL",
-    "UNWIND",
-    "CREATE",
-    "MERGE",
-    "SET",
-    "DELETE",
-    "DETACH",
-    "REMOVE",
-    "CALL",
-    "UNION",
-    "XOR",
-}
-_UNSUPPORTED = {
-    "OPTIONAL",
-    "UNWIND",
-    "CREATE",
-    "MERGE",
-    "SET",
-    "DELETE",
-    "DETACH",
-    "REMOVE",
-    "CALL",
-    "UNION",
-    "XOR",
-}
+} | _UNSUPPORTED
 
 
 @dataclass(frozen=True)
@@ -266,6 +255,22 @@ class _Parser:
             raise CypherError(f"expected a name at {t.start}, found {t.value or 'end of query'!r}")
         return t.value
 
+    def symbol(self) -> str:
+        """A label, relationship type or property key. Words that are keywords elsewhere, such as
+        :Order, :CONTAINS or n.desc, are fine here, so a keyword is taken as originally spelled."""
+        t = self.peek()
+        if t.kind == "kw":
+            self.next()
+            return self.text[t.start : t.end]
+        return self.ident()
+
+    def unsupported(self) -> None:
+        """Reject a clause outside the subset where a clause could start, not anywhere in the
+        text, so that a label such as :Set still parses."""
+        t = self.peek()
+        if t.kind == "kw" and (t.value in _UNSUPPORTED or t.value == "WITH"):
+            raise CypherError(f"{t.value} is not supported")
+
     def integer(self) -> int:
         t = self.next()
         if t.kind != "number" or "." in t.value:
@@ -274,16 +279,16 @@ class _Parser:
 
     # clauses
     def query(self) -> Query:
-        for t in self.toks:
-            if t.kind == "kw" and t.value in _UNSUPPORTED:
-                raise CypherError(f"{t.value} is not supported")
+        self.unsupported()
         self.expect("MATCH")
         patterns = [self.pattern()]
         while self.accept(","):
             patterns.append(self.pattern())
+        self.unsupported()
         if self.at("MATCH"):
             raise CypherError("only one MATCH clause is supported")
         where = self.expr() if self.accept("WHERE") else None
+        self.unsupported()
         self.expect("RETURN")
         distinct = self.accept("DISTINCT")
         items = [self.return_item()]
@@ -304,6 +309,7 @@ class _Parser:
                     break
         skip = self.integer() if self.accept("SKIP") else None
         limit = self.integer() if self.accept("LIMIT") else None
+        self.unsupported()
         if self.peek().kind != "end":
             t = self.peek()
             raise CypherError(f"unexpected {t.value!r} at {t.start}")
@@ -332,7 +338,7 @@ class _Parser:
         var = self.ident() if self.peek().kind == "ident" else None
         label = None
         if self.accept(":"):
-            label = self.ident()
+            label = self.symbol()
             if self.at(":") or self.at("|"):
                 raise CypherError("a node may have one label")
         props = self.prop_map() if self.at("{") else ()
@@ -347,10 +353,10 @@ class _Parser:
             if self.peek().kind == "ident":
                 var = self.ident()
             if self.accept(":"):
-                types.append(self.ident())
+                types.append(self.symbol())
                 while self.accept("|"):
                     self.accept(":")
-                    types.append(self.ident())
+                    types.append(self.symbol())
             if self.accept("*"):
                 var_length, lo, hi = True, 1, None
                 if self.peek().kind == "number":
@@ -378,7 +384,7 @@ class _Parser:
         pairs = []
         if not self.at("}"):
             while True:
-                key = self.ident()
+                key = self.symbol()
                 self.expect(":")
                 pairs.append((key, self.atom()))
                 if not self.accept(","):
@@ -458,7 +464,7 @@ class _Parser:
             if self.at("("):
                 return self.call(name)
             if self.accept("."):
-                return Prop(name, self.ident())
+                return Prop(name, self.symbol())
             return Var(name)
         raise CypherError(f"unexpected {t.value or 'end of query'!r} at {t.start}")
 

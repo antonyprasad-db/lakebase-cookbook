@@ -51,6 +51,13 @@ def test_follow_by_hand(films):
     assert rows == [("p:cara", ["f:up", "p:bob", "p:cara"])]
 
 
+def test_missing_nodes_have_no_paths(films):
+    assert shortest(films, "nope", "nope") is None
+    assert films.execute("SELECT * FROM graph.follow('nope', ARRAY[]::text[])").fetchall() == []
+    rows = films.execute("SELECT * FROM graph.follow('p:bob', ARRAY[]::text[])").fetchall()
+    assert rows == [("p:bob", ["p:bob"])]
+
+
 def test_bad_direction_raises(films):
     with pytest.raises(Exception, match="direction must be"):
         neighbors(films, "p:alice", 1, None, "sideways")
@@ -100,7 +107,7 @@ def test_functions_match_python_bfs(conn, seed):
         got = sorted(
             conn.execute("SELECT node_id, path FROM graph.follow(%s, %s)", (start, seq)).fetchall()
         )
-        want, frontier = [], [[start]]
+        frontier = [[start]]
         for t in seq:
             frontier = [[*p, e.dst] for p in frontier for e in g.out[p[-1]] if e.rel == t]
         want = sorted((p[-1], p) for p in frontier)

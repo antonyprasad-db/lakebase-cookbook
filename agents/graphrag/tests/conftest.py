@@ -55,8 +55,11 @@ def conn():
 # A films and people graph small enough to work every answer out by hand.
 FILMS = Graph(
     vertices={
-        "f:heat": ("Film", {"name": "Heat", "title": "Heat", "year": 1995}),
-        "f:up": ("Film", {"name": "Up", "title": "Up", "year": 2009}),
+        "f:heat": ("Film", {"name": "Heat", "title": "Heat", "year": 1995, "genre": ["crime"]}),
+        "f:up": (
+            "Film",
+            {"name": "Up", "title": "Up", "year": 2009, "rating": None, "genre": "animation"},
+        ),
         "p:alice": ("Person", {"name": "Alice", "born": 1970}),
         "p:bob": ("Person", {"name": "Bob", "born": 1985}),
         "p:cara": ("Person", {"name": "Cara", "born": 1990}),

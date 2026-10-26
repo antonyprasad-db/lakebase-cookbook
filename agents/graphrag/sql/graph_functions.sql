@@ -53,7 +53,7 @@ END $$;
 -- is deterministic.
 CREATE OR REPLACE FUNCTION graph.shortest_path(
     src_id text, dst_id text, max_hops int DEFAULT 6, rel_types text[] DEFAULT NULL,
-    direction text DEFAULT 'both')
+    direction text DEFAULT 'out')
 RETURNS text[]
 LANGUAGE plpgsql STABLE AS $$
 DECLARE
@@ -68,8 +68,9 @@ BEGIN
     IF direction NOT IN ('out', 'in', 'both') THEN
         RAISE EXCEPTION 'direction must be out, in or both, not %', direction;
     END IF;
-    IF src_id = dst_id THEN
-        RETURN ARRAY[src_id];
+    IF src_id = dst_id THEN  -- the empty path, if the node exists
+        RETURN CASE WHEN EXISTS (SELECT 1 FROM graph.nodes n WHERE n.node_id = src_id)
+                    THEN ARRAY[src_id] END;
     END IF;
     WHILE depth < max_hops AND cardinality(frontier) > 0 LOOP
         depth := depth + 1;
@@ -109,6 +110,7 @@ RETURNS TABLE (node_id text, path text[])
 LANGUAGE sql STABLE AS $$
     WITH RECURSIVE walk (vertex_id, step, path) AS (
         SELECT start_id, 0, ARRAY[start_id]
+        WHERE EXISTS (SELECT 1 FROM graph.nodes n WHERE n.node_id = start_id)
         UNION ALL
         SELECT e.dst_id, walk.step + 1, walk.path || e.dst_id
         FROM walk JOIN graph.edges e ON e.src_id = walk.vertex_id AND e.rel = rel_path[walk.step + 1]

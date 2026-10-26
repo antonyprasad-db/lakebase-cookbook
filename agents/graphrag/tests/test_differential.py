@@ -27,11 +27,18 @@ def random_graph(rng: random.Random) -> Graph:
     vertices = {}
     for i in range(n):
         props: dict = {}
-        if rng.random() < 0.8:
+        # a property is set, missing, or stored as JSON null, which must read as missing
+        roll = rng.random()
+        if roll < 0.7:
             props["x"] = rng.randint(0, 5)
+        elif roll < 0.85:
+            props["x"] = None
         props["name"] = rng.choice(NAMES)  # a NOT NULL column in graph.nodes
-        if rng.random() < 0.5:
+        roll = rng.random()
+        if roll < 0.5:
             props["flag"] = rng.random() < 0.5
+        elif roll < 0.6:
+            props["flag"] = None
         vertices[f"n{i}"] = (rng.choice(LABELS), props)
     ids = list(vertices)
     edges: dict[tuple, Edge] = {}  # graph.edges is keyed on (src_id, dst_id, rel)
@@ -40,7 +47,7 @@ def random_graph(rng: random.Random) -> Graph:
             rng.choice(ids),
             rng.choice(ids),
             rng.choice(TYPES),
-            {"w": rng.randint(0, 3)} if rng.random() < 0.7 else {},
+            rng.choice([{"w": rng.randint(0, 3)}] * 7 + [{"w": None}, {}, {}]),
         )
         edges.setdefault(e.key, e)
     return Graph(vertices, list(edges.values()))

@@ -153,7 +153,8 @@ functions against a Python breadth-first search, and an optional cross-check aga
 SQL/PGQ. See the README for how to run them.
 
 <Callout type="note" title="Scope">
-This covers a few hops over data already in Postgres. Deep traversals over dense graphs,
+This covers a few hops over data already in Postgres: variable-length patterns are capped at 6
+hops unless you raise `max_hops`. Deep traversals over dense graphs,
 whole-graph algorithms and graph-native writes belong in a dedicated graph engine.
 </Callout>
 

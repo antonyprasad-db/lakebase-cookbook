@@ -322,9 +322,12 @@ print(compile_cypher(query, {"film": "Up"}).sql)  # the generated SQL: plain joi
 ```
 
 The mapping onto the recipe schema: a node's label is `node_type`, its `name` property is the
-`name` column and every other property lives in `props`; a relationship's type is `rel`. Edges have
-no id column, so a relationship is identified by its key `(src_id, dst_id, rel)` and returned as
-`[src_id, dst_id, rel]`.
+`name` column and every other property lives in `props`; a relationship's type is `rel`. A property
+stored as JSON `null` reads as missing, as Cypher has no null properties. Edges have no id column,
+so a relationship is identified by its key `(src_id, dst_id, rel)` and returned as
+`[src_id, dst_id, rel]`. Variable-length patterns are capped at 6 hops, because the number of
+trails grows exponentially with hops around hub nodes; pass `max_hops=` to raise the cap
+deliberately.
 
 **Relationship uniqueness.** Cypher never binds the same relationship twice in one match, though a
 path may revisit a node. Around a triangle of three people who all know each other, three
@@ -335,7 +338,9 @@ revisiting a node, which is stricter than Cypher. For undirected walks the key c
 `edges_both.key_src` / `key_dst`, so crossing an edge back the other way counts as the same edge.
 
 **Tests** (`tests/`) need a Postgres database they may overwrite: its `graph` schema is dropped and
-rebuilt from `schema.sql` and `graph_functions.sql`, so they run on the recipe's own tables.
+rebuilt from `schema.sql` and `graph_functions.sql`, so they run on the recipe's own tables. That
+database needs the `vector`, `ltree` and `pg_trgm` extensions `schema.sql` creates. Lakebase has
+all three; a stock local Postgres usually needs pgvector installed first.
 
 ```bash
 cd agents/graphrag

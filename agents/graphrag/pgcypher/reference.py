@@ -104,8 +104,19 @@ def or3(a, b):
     return None if a is None or b is None else False
 
 
+def _numbers(v):
+    """1 and 1.0 are the same value to Cypher and to jsonb, so they must group the same here."""
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, list | tuple):
+        return [_numbers(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _numbers(x) for k, x in v.items()}
+    return v
+
+
 def canon(v) -> str:
-    return json.dumps(v, sort_keys=True)
+    return json.dumps(_numbers(v), sort_keys=True)
 
 
 # ------------------------------------------------------------------------------ matcher
@@ -288,8 +299,11 @@ class _Ref:
         return rows
 
     def order_column(self, e) -> int:
+        for i, it in enumerate(self.q.items):  # an alias wins over a variable of the same name
+            if isinstance(e, Var) and e.name == it.name:
+                return i
         for i, it in enumerate(self.q.items):
-            if e == it.expr or (isinstance(e, Var) and e.name == it.name):
+            if e == it.expr:
                 return i
         raise CypherError("ORDER BY must name a RETURN item")
 
@@ -303,8 +317,10 @@ class _Ref:
 
 
 def sort_key(v):
-    rank = {"string": 1, "boolean": 2, "number": 3}.get(kind(v) or "", 4)
-    return (rank, v if rank < 4 else 0)
+    rank = {"object": 0, "array": 1, "string": 2, "boolean": 3, "number": 4}.get(kind(v) or "", 5)
+    if rank < 2:  # as Postgres orders jsonb maps and lists: by size first
+        return (rank, len(v), canon(v))
+    return (rank, 0, v if rank < 5 else 0)
 
 
 def run_reference(text: str, graph: Graph, params: dict | None = None) -> list[tuple]:

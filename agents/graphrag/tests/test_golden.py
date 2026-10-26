@@ -3,10 +3,14 @@ compiled SQL and from the reference matcher, so a parser bug shared by the two s
 
 from __future__ import annotations
 
+import datetime
 import os
+from decimal import Decimal
 
+import psycopg
 import pytest
 from conftest import FILMS
+from psycopg.rows import dict_row
 
 from pgcypher.compiler import compile_cypher, run
 from pgcypher.parser import CypherError
@@ -141,6 +145,29 @@ CASES = [
         None,
         [("Alice", ["Heat"]), ("Bob", ["Up"])],
     ),
+    (  # lists order repeatably, so SKIP and LIMIT over them are stable
+        "MATCH (d)<-[:DIRECTOR]-(f) RETURN d.name, collect(f.title) AS films ORDER BY films DESC",
+        None,
+        [("Bob", ["Up"]), ("Alice", ["Heat"])],
+    ),
+    # Cypher orders lists before strings, whatever the list holds
+    (
+        "MATCH (f:Film) RETURN f.title, f.genre ORDER BY f.genre",
+        None,
+        [("Heat", ["crime"]), ("Up", "animation")],
+    ),
+    # Up stores rating as JSON null and Heat has none: both are missing, as in Cypher
+    ("MATCH (f:Film) WHERE f.rating IS NULL RETURN count(*) AS n", None, [(2,)]),
+    ("MATCH (f:Film) RETURN count(f.rating) AS n, collect(f.rating) AS r", None, [(0, [])]),
+    # WHERE n.name = ... takes the same text-equality path as {name: ...}
+    ("MATCH (f)-[:DIRECTOR]->(d) WHERE f.name = $film RETURN d.name", {"film": "Up"}, [("Bob",)]),
+    ("MATCH (f)-[:DIRECTOR]->(d) WHERE 'Heat' = f.name RETURN d.name", None, [("Alice",)]),
+    (  # an ORDER BY name is the RETURN alias, even when a variable has the same name
+        "MATCH (a:Person), (b:Person) WHERE a.born < b.born RETURN a AS b, b AS a"
+        " ORDER BY a DESC, b",
+        None,
+        [("p:alice", "p:cara"), ("p:bob", "p:cara"), ("p:alice", "p:bob")],
+    ),
     ("MATCH (p:Person) WHERE p.born > 3000 RETURN count(*) AS n", None, [(0,)]),
     (
         "MATCH (p:Person) RETURN p.name ORDER BY p.name DESC SKIP 1 LIMIT 2",
@@ -194,11 +221,54 @@ def test_without_uniqueness_the_triangle_has_24_walks(films):
         "MATCH (a)-[r]->(b), (b)-[r]->(c) RETURN a",
         "MATCH (a) RETURN a.x, a.x",
         "MATCH (a) WHERE a.x = $missing RETURN a",
+        "MATCH (a) SET a.x = 1 RETURN a",
+        "MATCH (a) WHERE a.x = 1 XOR a.y = 2 RETURN a",
+        "MATCH (a) RETURN a UNION MATCH (b) RETURN b",
+        "MATCH (a) OPTIONAL MATCH (b) RETURN a",
+        "MATCH (a)-[*1..7]->(b) RETURN a",  # above the default hop cap
     ],
 )
 def test_unsupported_or_invalid_queries_raise(query):
     with pytest.raises(CypherError):
         compile_cypher(query)
+
+
+def test_hop_cap_can_be_raised_deliberately():
+    assert "hops < 7" in compile_cypher("MATCH (a)-[*1..7]->(b) RETURN a", max_hops=7).sql
+
+
+@pytest.mark.parametrize(
+    "query", ["MATCH (f {name: $n}) RETURN f", "MATCH (f) WHERE f.name = $n RETURN f"]
+)
+def test_name_equality_is_text_so_the_name_index_serves_it(query):
+    """Both forms must compare the name column as text; to_jsonb(name) would bypass the btree."""
+    sql = compile_cypher(query, {"n": "Up"}).sql
+    assert "v1.name = %(" in sql and "to_jsonb(v1.name) =" not in sql
+
+
+def test_keywords_are_fine_as_labels_types_and_keys():
+    c = compile_cypher(
+        "MATCH (o:Order)-[:CONTAINS]->(p:Set {limit: 1}) WHERE o.desc = 'x' RETURN o.order"
+    )
+    bound = [v for v in c.params.values()]
+    assert {"Order", "Set", "limit", "desc", "order"} <= {v for v in bound if isinstance(v, str)}
+    assert ["CONTAINS"] in bound
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), datetime.date(2024, 1, 1), {1, 2}])
+def test_parameters_json_cannot_hold_raise(value):
+    with pytest.raises(CypherError):
+        compile_cypher("MATCH (f) WHERE f.year > $y RETURN f", {"y": value})
+
+
+def test_decimal_parameters_are_numbers(films):
+    rows = run(films, "MATCH (f:Film) WHERE f.year >= $y RETURN f.title", {"y": Decimal("2000.0")})
+    assert rows == [("Up",)]
+
+
+def test_rows_are_values_whatever_the_row_factory(films):
+    with psycopg.connect(os.environ["PGRAPH_DSN"], row_factory=dict_row) as conn:
+        assert run(conn, "MATCH (f:Film {name: 'Up'}) RETURN f.title") == [("Up",)]
 
 
 def test_values_are_bind_parameters_never_sql_text():
