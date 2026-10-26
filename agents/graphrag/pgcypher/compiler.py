@@ -11,8 +11,10 @@ values: a node variable returns the node_id, a relationship variable its key as
 Literals, parameters, labels and property keys are always bind parameters; only validated integers
 (hop bounds, SKIP, LIMIT) and generated aliases are written into the SQL text.
 
-Variable length relationships are capped at max_hops (default 6), because the number of trails
-grows exponentially with hops on a graph with hubs; pass a larger max_hops deliberately.
+The variable length relationships in one MATCH may total at most max_hops (default 6) hops,
+because the number of trails grows exponentially with hops on a graph with hubs; pass a larger
+max_hops deliberately. Each walk is a recursive CTE whose Postgres CYCLE clause, keyed on the
+edge's key, keeps it a trail.
 
 The semantics that matter for correctness follow Cypher:
   no edge is bound twice within the MATCH, including inside a variable length path (relationship
@@ -20,6 +22,10 @@ The semantics that matter for correctness follow Cypher:
   a missing property is null, and so is one stored as JSON null (Cypher cannot store a null
   property), and comparisons involving null are null (three valued logic);
   < <= > >= across different types are null, and strings compare by code point (COLLATE "C");
+  < <= > >= between two lists or two maps are null too: a deliberate gap, not Cypher's
+  element by element order;
+  a node, relationship or path may be compared only with another of the same kind (= or <>),
+  and is never a condition by itself: anything else is rejected rather than approximated;
   count(x) and collect(x) skip nulls, and the non aggregated RETURN items are the grouping keys.
 """
 
@@ -27,7 +33,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -51,7 +56,6 @@ from .parser import (
     parse,
 )
 
-_SCHEMA = re.compile(r"^[a-z_][a-z0-9_]*$")
 MAX_HOPS = 6
 
 
@@ -80,14 +84,9 @@ class Compiled:
 
 
 class _Compiler:
-    def __init__(self, schema: str, params: dict | None, trail: str, max_hops: int) -> None:
-        if not _SCHEMA.match(schema):
-            raise CypherError("schema must be a plain lower case identifier")
-        if trail not in ("cycle", "array"):
-            raise CypherError("trail must be cycle or array")
-        self.s = schema
-        self.trail = trail
+    def __init__(self, params: dict | None, max_hops: int) -> None:
         self.max_hops = max_hops
+        self.hops = 0  # upper bounds of the variable length relationships so far
         self.user_params = params or {}
         self.params: dict = {}
         self.from_: list[str] = []
@@ -130,7 +129,7 @@ class _Compiler:
                 raise CypherError(f"{n.var} is a relationship, not a node")
         else:
             alias = self.alias("v")
-            self.from_.append(f"{self.s}.nodes AS {alias}")
+            self.from_.append(f"graph.nodes AS {alias}")
             if n.var:
                 self.vars[n.var] = ("node", alias)
         if n.label:
@@ -149,21 +148,20 @@ class _Compiler:
             return f"to_jsonb({alias}.name)"
         return self.prop(alias, key)
 
-    def name_equals(self, alias: str, e) -> str | None:
-        """name = a string, as plain text equality so the btree on name serves it, or None when
-        the other side is not a string literal or parameter."""
-        if isinstance(e, Lit):
-            value = e.value
-        elif isinstance(e, Param):
-            value = self.user_params.get(e.name)
-        else:
-            return None
-        return f"{alias}.name = {self.bind(value)}" if isinstance(value, str) else None
+    def name_equals(self, alias: str, e) -> str:
+        """name = e as text equality on the name column, so the btree on name serves it for any
+        e, with Cypher's result when e is not a string (false) or is null (null)."""
+        v = self.val(e)
+        return f"({alias}.name = ({v} #>> '{{}}') AND jsonb_typeof({v}) = 'string')"
 
     def node_match(self, alias: str, key: str, e) -> str:
-        if key == "name" and (fast := self.name_equals(alias, e)):
-            return fast
+        if key == "name":
+            return self.name_equals(alias, e)
         return f"{self.node_prop(alias, key)} = {self.val(e)}"
+
+    def entity(self, e) -> str | None:
+        """node, rel or path when e is a bare variable, which is compared by identity only."""
+        return self.lookup(e.name)[0] if isinstance(e, Var) else None
 
     def edge_key(self, a: str) -> tuple[str, str]:
         """The edge's key as a row, for comparing two single edges, and as text, for checking it
@@ -185,10 +183,13 @@ class _Compiler:
     def rel(self, r: RelPat, left: str, right: str) -> None:
         if r.var and r.var in self.vars:
             raise CypherError(f"variable {r.var} is bound twice")
-        if r.var_length and r.hi > self.max_hops:
-            raise CypherError(
-                f"*..{r.hi} is above the cap of {self.max_hops} hops; pass max_hops to raise it"
-            )
+        if r.var_length:
+            self.hops += r.hi
+            if self.hops > self.max_hops:
+                raise CypherError(
+                    f"variable length relationships total {self.hops} hops, above the cap of"
+                    f" {self.max_hops}; pass max_hops to raise it"
+                )
         # edges_both holds every edge in both directions of travel and keeps its stored key in
         # key_src/key_dst, so an undirected walk sees one edge, not two, whichever way it crosses it
         table, ks, kd = (
@@ -199,7 +200,7 @@ class _Compiler:
         near, far = ("dst_id", "src_id") if r.direction == "in" else ("src_id", "dst_id")
         if not r.var_length:
             a = self.alias("e")
-            self.from_.append(f"{self.s}.{table} AS {a}")
+            self.from_.append(f"graph.{table} AS {a}")
             self.keycols[a] = (ks, kd)
             self.conds += [
                 f"{a}.{near} = {left}.node_id",
@@ -213,44 +214,27 @@ class _Compiler:
         w = self.alias("w")
         step = "".join(f" AND {c}" for c in self.edge_filters("e", r))
         key = f"jsonb_build_array(e.{ks}, e.{kd}, e.rel)"
-        # Each walk row carries keys, its edge keys as text, for uniqueness against the rest of the
-        # MATCH. A named path also carries edges, the same keys as jsonb, which is what it returns.
-        # In cycle mode the Postgres CYCLE clause, keyed on the edge's key, keeps the walk a trail;
-        # in array mode the same rule is written out by hand against keys.
-        cycle, named = self.trail == "cycle", r.var is not None
-        cols, start, take = (
-            ["node_id", "hops"],
-            [f"{left}.node_id", "0"],
-            [f"e.{far}", "walk.hops + 1"],
-        )
-        if cycle:
-            cols += ["key_src", "key_dst", "rel"]
-            start += ["NULL::text", "NULL::text", "NULL::text"]
-            take += [f"e.{ks}", f"e.{kd}", "e.rel"]
-        cols.append("keys")
-        start.append("ARRAY[]::text[]")
-        take.append(f"walk.keys || {key}::text")
-        if named:
-            cols.append("edges")
-            start.append("'[]'::jsonb")
-            take.append(f"walk.edges || jsonb_build_array({key})")
-        out = ", ".join(["node_id", "keys"] + (["edges"] if named else []))
+        # The Postgres CYCLE clause, keyed on the edge's key, keeps the walk a trail. Each row also
+        # carries keys, its edge keys as text, for uniqueness against the rest of the MATCH; a
+        # named path carries edges too, the same keys as jsonb, which is what it returns.
+        named = r.var is not None
+        edges_col = ", edges" if named else ""
+        edges_start = ", '[]'::jsonb" if named else ""
+        edges_step = f", walk.edges || jsonb_build_array({key})" if named else ""
         self.from_.append(
             "LATERAL (\n"
-            f"    WITH RECURSIVE walk ({', '.join(cols)}) AS (\n"
-            f"        SELECT {', '.join(start)}\n"
-            "        UNION ALL\n"
-            f"        SELECT {', '.join(take)}\n"
-            f"        FROM walk JOIN {self.s}.{table} AS e ON e.{near} = walk.node_id{step}\n"
-            f"        WHERE walk.hops < {int(r.hi)}"
-            + (
-                "\n    ) CYCLE key_src, key_dst, rel SET reused USING trail\n"
-                if cycle
-                else f" AND NOT {key}::text = ANY (walk.keys)\n    )\n"
-            )
-            + f"    SELECT {out} FROM walk WHERE hops >= {int(r.lo)}"
-            + (" AND NOT reused" if cycle else "")
-            + f"\n) AS {w}"
+            f"  WITH RECURSIVE walk (node_id, hops, key_src, key_dst, rel, keys{edges_col}) AS (\n"
+            f"    SELECT {left}.node_id, 0, NULL::text, NULL::text, NULL::text, ARRAY[]::text[]"
+            f"{edges_start}\n"
+            "    UNION ALL\n"
+            f"    SELECT e.{far}, walk.hops + 1, e.{ks}, e.{kd}, e.rel,\n"
+            f"           walk.keys || {key}::text{edges_step}\n"
+            f"    FROM walk JOIN graph.{table} AS e ON e.{near} = walk.node_id{step}\n"
+            f"    WHERE walk.hops < {int(r.hi)}\n"
+            "  ) CYCLE key_src, key_dst, rel SET reused USING trail\n"
+            f"  SELECT node_id, keys{edges_col} FROM walk\n"
+            f"  WHERE hops >= {int(r.lo)} AND NOT reused\n"
+            f") AS {w}"
         )
         self.conds.append(f"{w}.node_id = {right}.node_id")
         self.edges.append(("many", f"{w}.keys"))
@@ -307,6 +291,8 @@ class _Compiler:
                 return "TRUE" if e.value else "FALSE"
             raise CypherError("a condition must be boolean")
         if isinstance(e, (Var, Prop, Param)):
+            if kind := self.entity(e):
+                raise CypherError(f"{e.name} is a {kind}, not a condition")
             return f"({self.val(e)} = 'true'::jsonb)"
         if isinstance(e, BoolOp):
             return f"({self.cond(e.left)} {e.op} {self.cond(e.right)})"
@@ -315,6 +301,11 @@ class _Compiler:
         if isinstance(e, IsNull):
             return f"({self.val(e.expr)} IS {'NOT ' if e.negated else ''}NULL)"
         if isinstance(e, Cmp):
+            kinds = {self.entity(e.left), self.entity(e.right)}
+            if kinds != {None} and (len(kinds) > 1 or e.op not in ("=", "<>")):
+                raise CypherError(
+                    "a node, relationship or path compares only with = or <> to another of its kind"
+                )
             if e.op == "=" and (fast := self.name_equality(e)):
                 return fast
             left, right = self.val(e.left), self.val(e.right)
@@ -322,10 +313,15 @@ class _Compiler:
                 return f"({left} {e.op} {right})"
             return (
                 f"(CASE WHEN jsonb_typeof({left}) <> jsonb_typeof({right}) THEN NULL"
+                f" WHEN jsonb_typeof({left}) IN ('array', 'object') THEN NULL"
                 f" WHEN jsonb_typeof({left}) = 'string'"
                 f" THEN ({left} #>> '{{}}') COLLATE \"C\" {e.op} ({right} #>> '{{}}')"
                 f" ELSE {left} {e.op} {right} END)"
             )
+        if isinstance(e, StrOp | InList):
+            for x in (e.left, e.right) if isinstance(e, StrOp) else (e.expr, *e.items):
+                if kind := self.entity(x):
+                    raise CypherError(f"{x.name} is a {kind}; use one of its properties")
         if isinstance(e, StrOp):
             left, right = self.val(e.left), self.val(e.right)
             ls, rs = f"({left} #>> '{{}}')", f"({right} #>> '{{}}')"
@@ -344,12 +340,12 @@ class _Compiler:
         raise CypherError(f"unsupported expression {e!r}")
 
     def name_equality(self, e: Cmp) -> str | None:
-        """WHERE n.name = 'x' (either way round) on a node, as text equality on the name column."""
+        """WHERE n.name = x (either way round) on a node, as text equality on the name column."""
         for prop, other in ((e.left, e.right), (e.right, e.left)):
             if isinstance(prop, Prop) and prop.key == "name":
                 kind, alias = self.lookup(prop.var)
-                if kind == "node" and (fast := self.name_equals(alias, other)):
-                    return f"({fast})"
+                if kind == "node":
+                    return self.name_equals(alias, other)
         return None
 
     def agg(self, a: Agg) -> str:
@@ -427,30 +423,16 @@ class _Compiler:
         return Compiled(sql, self.params, [it.name for it in q.items])
 
 
-def compile_cypher(
-    text: str,
-    params: dict | None = None,
-    schema: str = "graph",
-    trail: str = "cycle",
-    max_hops: int = MAX_HOPS,
-) -> Compiled:
-    """trail picks how a variable length walk is kept from reusing an edge: the CYCLE clause
-    (default) or an explicit array check. Both give the same rows; the tests run both."""
-    return _Compiler(schema, params, trail, max_hops).compile(parse(text))
+def compile_cypher(text: str, params: dict | None = None, max_hops: int = MAX_HOPS) -> Compiled:
+    """Compile against the graph schema that sql/schema.sql and sql/graph_functions.sql create."""
+    return _Compiler(params, max_hops).compile(parse(text))
 
 
-def run(
-    conn,
-    text: str,
-    params: dict | None = None,
-    schema: str = "graph",
-    trail: str = "cycle",
-    max_hops: int = MAX_HOPS,
-) -> list[tuple]:
+def run(conn, text: str, params: dict | None = None, max_hops: int = MAX_HOPS) -> list[tuple]:
     """Compile and execute on a psycopg connection; returns rows of Python JSON values, whatever
     row factory the connection was opened with."""
     from psycopg.rows import tuple_row
 
-    c = compile_cypher(text, params, schema, trail, max_hops)
+    c = compile_cypher(text, params, max_hops)
     with conn.cursor(row_factory=tuple_row) as cur:
         return cur.execute(c.sql, c.params).fetchall()

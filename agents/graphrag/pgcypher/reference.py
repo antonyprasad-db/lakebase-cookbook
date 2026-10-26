@@ -80,14 +80,26 @@ def kind(v) -> str | None:
     return "array" if isinstance(v, list) else "object"
 
 
+def same(a, b) -> bool:
+    """Equality as jsonb has it: same kind, then same value, element by element for lists and
+    maps, so [1] and [true] differ while 1 and 1.0 do not."""
+    if kind(a) != kind(b):
+        return False
+    if isinstance(a, list):
+        return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b, strict=True))
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(same(a[k], b[k]) for k in a)
+    return a == b
+
+
 def eq(a, b):
     if a is None or b is None:
         return None
-    return kind(a) == kind(b) and a == b
+    return same(a, b)
 
 
 def order(op: str, a, b):
-    if a is None or b is None or kind(a) != kind(b):
+    if a is None or b is None or kind(a) != kind(b) or kind(a) in ("array", "object"):
         return None
     return {"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b}[op]
 
@@ -316,11 +328,23 @@ class _Ref:
         return len(values) if a.func == "count" else values
 
 
+def _jsonb_key(v):
+    """Postgres's jsonb btree order, used within lists: null < string < number < boolean < list
+    < map, lists by length and then element by element."""
+    k = kind(v)
+    if k is None:
+        return (0,)
+    if k in ("array", "object"):
+        items = v if k == "array" else [x for _, x in sorted(v.items())]
+        return (4 if k == "array" else 5, len(v), tuple(_jsonb_key(x) for x in items))
+    return ({"string": 1, "number": 2, "boolean": 3}[k], v)
+
+
 def sort_key(v):
     rank = {"object": 0, "array": 1, "string": 2, "boolean": 3, "number": 4}.get(kind(v) or "", 5)
-    if rank < 2:  # as Postgres orders jsonb maps and lists: by size first
-        return (rank, len(v), canon(v))
-    return (rank, 0, v if rank < 5 else 0)
+    if rank < 2:  # maps and lists order as Postgres orders jsonb
+        return (rank, _jsonb_key(v))
+    return (rank, (v if rank < 5 else 0,))
 
 
 def run_reference(text: str, graph: Graph, params: dict | None = None) -> list[tuple]:

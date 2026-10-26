@@ -58,9 +58,12 @@ def test_missing_nodes_have_no_paths(films):
     assert rows == [("p:bob", ["p:bob"])]
 
 
-def test_bad_direction_raises(films):
+@pytest.mark.parametrize("direction", ["sideways", None])
+def test_bad_direction_raises(films, direction):
     with pytest.raises(Exception, match="direction must be"):
-        neighbors(films, "p:alice", 1, None, "sideways")
+        neighbors(films, "p:alice", 1, None, direction)
+    with pytest.raises(Exception, match="direction must be"):
+        shortest(films, "p:alice", "p:bob", 2, None, direction)
 
 
 def bfs(g, start, hops, types, direction):

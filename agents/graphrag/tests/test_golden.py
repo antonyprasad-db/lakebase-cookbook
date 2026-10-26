@@ -9,14 +9,13 @@ from decimal import Decimal
 
 import psycopg
 import pytest
-from conftest import FILMS
+from conftest import FILMS, install
 from psycopg.rows import dict_row
 
 from pgcypher.compiler import compile_cypher, run
-from pgcypher.parser import CypherError
+from pgcypher.parser import CypherError, Lit, parse
 from pgcypher.reference import run_reference
 
-TRAIL = os.environ.get("PGRAPH_TRAIL", "cycle")
 KNOWS_AB = ["p:alice", "p:bob", "KNOWS"]
 KNOWS_BC = ["p:bob", "p:cara", "KNOWS"]
 KNOWS_CA = ["p:cara", "p:alice", "KNOWS"]
@@ -150,6 +149,23 @@ CASES = [
         None,
         [("Bob", ["Up"]), ("Alice", ["Heat"])],
     ),
+    # lists: equal element by element; < between two lists is null (a documented gap)
+    ("MATCH (f:Film) WHERE f.genre = $g RETURN f.title", {"g": ["crime"]}, [("Heat",)]),
+    ("MATCH (f:Film) WHERE f.genre < $g RETURN f.title", {"g": ["a", "b"]}, []),
+    # Alice's lucky is [1] and Bob's is [true]: different lists, as in jsonb and Cypher
+    (
+        "MATCH (a:Person), (b:Person) WHERE a.lucky = b.lucky"
+        " RETURN a.name, b.name ORDER BY a.name",
+        None,
+        [("Alice", "Alice"), ("Bob", "Bob")],
+    ),
+    # nodes compare with nodes, by identity
+    ("MATCH (a:Person), (b:Person) WHERE a = b RETURN count(*) AS n", None, [(4,)]),
+    (
+        "MATCH (a:Person)-[:KNOWS]->(b), (b)-[:KNOWS]->(c) WHERE a <> c RETURN count(*) AS n",
+        None,
+        [(3,)],
+    ),
     # Cypher orders lists before strings, whatever the list holds
     (
         "MATCH (f:Film) RETURN f.title, f.genre ORDER BY f.genre",
@@ -189,7 +205,7 @@ CASES = [
 
 @pytest.mark.parametrize(("query", "params", "expected"), CASES, ids=[c[0][:60] for c in CASES])
 def test_sql_matches_hand_answer(films, query, params, expected):
-    assert run(films, query, params, trail=TRAIL) == expected
+    assert run(films, query, params) == expected
 
 
 @pytest.mark.parametrize(("query", "params", "expected"), CASES, ids=[c[0][:60] for c in CASES])
@@ -226,6 +242,14 @@ def test_without_uniqueness_the_triangle_has_24_walks(films):
         "MATCH (a) RETURN a UNION MATCH (b) RETURN b",
         "MATCH (a) OPTIONAL MATCH (b) RETURN a",
         "MATCH (a)-[*1..7]->(b) RETURN a",  # above the default hop cap
+        "MATCH (a)-[*1..3]->(b)-[*1..4]->(c) RETURN a",  # the cap is per MATCH
+        "MATCH (a) WHERE a = 'p:alice' RETURN a",  # a node is not a string
+        "MATCH (a) WHERE a RETURN a",
+        "MATCH (a)-[r]->(b) WHERE r = b RETURN a",
+        "MATCH (a)-[r]->(b) WHERE a < b RETURN a",
+        "MATCH (a) WHERE a IN ['p:alice'] RETURN a",
+        "MATCH (a) WHERE a STARTS WITH 'p' RETURN a",
+        "MATCH (a) WHERE a.name = 'x\\q' RETURN a",  # an escape Cypher does not have
     ],
 )
 def test_unsupported_or_invalid_queries_raise(query):
@@ -243,7 +267,23 @@ def test_hop_cap_can_be_raised_deliberately():
 def test_name_equality_is_text_so_the_name_index_serves_it(query):
     """Both forms must compare the name column as text; to_jsonb(name) would bypass the btree."""
     sql = compile_cypher(query, {"n": "Up"}).sql
-    assert "v1.name = %(" in sql and "to_jsonb(v1.name) =" not in sql
+    assert "v1.name = (" in sql and "to_jsonb(v1.name) =" not in sql
+    assert compile_cypher(query, {"n": 5}).sql == sql  # the SQL never depends on the value
+
+
+@pytest.mark.parametrize(
+    ("literal", "value"),
+    [
+        (r"'\u00e9'", "\u00e9"),
+        (r"'a\rb'", "a\rb"),
+        (r"'\U0001F600'", "\U0001f600"),
+        (r"'it\'s'", "it's"),
+        (r'"say \"hi\""', 'say "hi"'),
+        (r"'back\\slash'", "back\\slash"),
+    ],
+)
+def test_string_escapes(literal, value):
+    assert parse(f"MATCH (a) WHERE a.x = {literal} RETURN a").where.right == Lit(value)
 
 
 def test_keywords_are_fine_as_labels_types_and_keys():
@@ -264,6 +304,18 @@ def test_parameters_json_cannot_hold_raise(value):
 def test_decimal_parameters_are_numbers(films):
     rows = run(films, "MATCH (f:Film) WHERE f.year >= $y RETURN f.title", {"y": Decimal("2000.0")})
     assert rows == [("Up",)]
+
+
+def test_a_graph_schema_the_tests_did_not_create_is_never_dropped(films):
+    films.execute("DROP TABLE graph.pgraph_tests")  # now it looks like someone else's graph
+    try:
+        with pytest.raises(pytest.exit.Exception, match="refusing to drop"):
+            install(films)
+        assert films.execute("SELECT count(*) FROM graph.nodes").fetchone()[0] == len(
+            FILMS.vertices
+        )
+    finally:
+        films.execute("CREATE TABLE graph.pgraph_tests ()")
 
 
 def test_rows_are_values_whatever_the_row_factory(films):

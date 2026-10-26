@@ -1,7 +1,7 @@
-"""Shared fixtures. Point PGRAPH_DSN at a Postgres database the tests may overwrite: its graph
-schema is dropped and rebuilt from sql/schema.sql and sql/graph_functions.sql, so the tests run on
-the recipe's own tables. It needs the extensions schema.sql creates (vector, ltree, pg_trgm), which
-Lakebase has."""
+"""Shared fixtures. Point PGRAPH_DSN at a throwaway Postgres database: its graph schema is dropped
+and rebuilt from sql/schema.sql and sql/graph_functions.sql, so the tests run on the recipe's own
+tables. It needs the extensions schema.sql creates (vector, ltree, pg_trgm), which Lakebase has.
+A graph schema that holds data the tests did not create is never dropped: the run stops instead."""
 
 from __future__ import annotations
 
@@ -20,9 +20,22 @@ from pgcypher.reference import Edge, Graph  # noqa: E402
 
 
 def install(conn) -> None:
+    """Rebuild the graph schema. install() leaves a graph.pgraph_tests marker table, and a graph
+    schema with data but no marker belongs to someone else, so it is left alone."""
+    has_nodes, ours = conn.execute(
+        "SELECT to_regclass('graph.nodes') IS NOT NULL,"
+        " to_regclass('graph.pgraph_tests') IS NOT NULL"
+    ).fetchone()
+    if has_nodes and not ours and conn.execute("SELECT EXISTS (TABLE graph.nodes)").fetchone()[0]:
+        pytest.exit(
+            "PGRAPH_DSN has a graph schema with data these tests did not create; refusing to drop"
+            " it. Point PGRAPH_DSN at a throwaway database.",
+            returncode=2,
+        )
     conn.execute("DROP SCHEMA IF EXISTS graph CASCADE")
     conn.execute((ROOT / "sql/schema.sql").read_text())
     conn.execute((ROOT / "sql/graph_functions.sql").read_text())
+    conn.execute("CREATE TABLE graph.pgraph_tests ()")
 
 
 def load(conn, g: Graph) -> None:
@@ -60,8 +73,8 @@ FILMS = Graph(
             "Film",
             {"name": "Up", "title": "Up", "year": 2009, "rating": None, "genre": "animation"},
         ),
-        "p:alice": ("Person", {"name": "Alice", "born": 1970}),
-        "p:bob": ("Person", {"name": "Bob", "born": 1985}),
+        "p:alice": ("Person", {"name": "Alice", "born": 1970, "lucky": [1]}),
+        "p:bob": ("Person", {"name": "Bob", "born": 1985, "lucky": [True]}),
         "p:cara": ("Person", {"name": "Cara", "born": 1990}),
         "p:dan": ("Person", {"name": "Dan"}),
     },

@@ -130,7 +130,8 @@ Retrieval answers "what is near this seed". Questions that follow specific relat
 
 - [`sql/graph_functions.sql`](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/sql/graph_functions.sql) adds `graph.neighbors`,
   `graph.shortest_path` and `graph.follow` in plain SQL and PL/pgSQL, a btree index on
-  `nodes.name` for exact lookups, and a `graph.edges_both` view for undirected patterns.
+  `nodes.name` for exact lookups, and a `graph.edges_both` view for undirected patterns. Apply it
+  after `schema.sql`.
 - [`pgcypher/`](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/pgcypher) compiles a read-only subset of openCypher into one SQL query, with
   every value as a bind parameter. Unsupported clauses such as OPTIONAL MATCH are rejected, not
   approximated.
@@ -153,8 +154,8 @@ functions against a Python breadth-first search, and an optional cross-check aga
 SQL/PGQ. See the README for how to run them.
 
 <Callout type="note" title="Scope">
-This covers a few hops over data already in Postgres: variable-length patterns are capped at 6
-hops unless you raise `max_hops`. Deep traversals over dense graphs,
+This covers a few hops over data already in Postgres: the variable-length patterns in one query
+are capped at 6 hops in total unless you raise `max_hops`. Deep traversals over dense graphs,
 whole-graph algorithms and graph-native writes belong in a dedicated graph engine.
 </Callout>
 

@@ -18,7 +18,6 @@ from pgcypher.reference import Edge, Graph, canon, run_reference
 LABELS, TYPES = ["A", "B", "C"], ["R", "S", "T"]
 NAMES = ["al", "alba", "bo", "bob", "cy", "Cy"]
 SEEDS = range(int(os.environ.get("PGRAPH_CASES", "300")))
-TRAIL = os.environ.get("PGRAPH_TRAIL", "cycle")
 QUERIES_PER_GRAPH = 4
 
 
@@ -39,6 +38,8 @@ def random_graph(rng: random.Random) -> Graph:
             props["flag"] = rng.random() < 0.5
         elif roll < 0.6:
             props["flag"] = None
+        if rng.random() < 0.4:  # lists: [1] and [true] differ, and < between lists is null
+            props["tags"] = [rng.choice([0, 1, True, "a", "b"]) for _ in range(rng.randint(0, 2))]
         vertices[f"n{i}"] = (rng.choice(LABELS), props)
     ids = list(vertices)
     edges: dict[tuple, Edge] = {}  # graph.edges is keyed on (src_id, dst_id, rel)
@@ -105,7 +106,7 @@ class QueryGen:
     def pred(self) -> str:
         r = self.rng
         v = r.choice(self.nodes)
-        choice = r.randrange(9)
+        choice = r.randrange(10)
         if choice == 0 and self.rels:
             op = r.choice(["=", "<>", "<", ">=", "<="])
             return f"{r.choice(self.rels)}.w {op} {r.randint(0, 3)}"
@@ -127,6 +128,8 @@ class QueryGen:
             return f"{v}.x IN [{', '.join(items)}]"
         if choice == 7:
             return f"{v}.flag"
+        if choice == 9:
+            return f"{v}.tags {r.choice(['=', '<>', '<', '>='])} {r.choice(self.nodes)}.tags"
         return f"{v}.name > {r.randint(0, 3)}"  # type mismatch: always null
 
     def where(self, depth: int = 2) -> str:
@@ -148,7 +151,7 @@ class QueryGen:
         text = "MATCH " + ", ".join(patterns)
         if r.random() < 0.6:
             text += " WHERE " + self.where()
-        scalars = [f"{v}{p}" for v in self.nodes for p in ("", ".x", ".name")] + [
+        scalars = [f"{v}{p}" for v in self.nodes for p in ("", ".x", ".name", ".tags")] + [
             f"{v}.w" for v in self.rels
         ]
         if r.random() < 0.35:
@@ -199,7 +202,7 @@ def test_compiled_sql_matches_reference(conn, seed):
         gen = QueryGen(rng)
         text, kinds, ordered = gen.query()
         expected = normalize(run_reference(text, g), kinds)
-        got = normalize(run(conn, text, trail=TRAIL), kinds)
+        got = normalize(run(conn, text), kinds)
         if not ordered:
             expected, got = sorted(expected), sorted(got)
         assert got == expected, (

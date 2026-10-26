@@ -1,5 +1,6 @@
 """Cross check against Postgres's own SQL/PGQ, as it stood at 6168c65, the last commit before the
-2026-09-07 revert. Set PGRAPH_PGQ_DSN to a server built from that commit to run; it is skipped
+2026-09-07 revert. Set PGRAPH_PGQ_DSN to a throwaway database on a server built from that commit
+(with pgvector, ltree and pg_trgm installed, as schema.sql needs them) to run; it is skipped
 otherwise, since no released Postgres has SQL/PGQ.
 
 That build supports a single fixed length path pattern and lets one edge match twice in a path, so

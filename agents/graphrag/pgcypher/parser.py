@@ -211,8 +211,23 @@ def tokenize(text: str) -> list[Tok]:
     return out
 
 
+_ESCAPES = {"t": "\t", "b": "\b", "n": "\n", "r": "\r", "f": "\f", "'": "'", '"': '"', "\\": "\\"}
+
+
 def _unquote(s: str) -> str:
-    return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), s[1:-1])
+    """Cypher's string escapes: \\t \\b \\n \\r \\f \\' \\" \\\\ \\uXXXX \\UXXXXXXXX. Any other
+    escape is an error, never a guess."""
+
+    def one(m: re.Match) -> str:
+        hexa, other = m.group(1) or m.group(2), m.group(3)
+        if other is not None:
+            if other in _ESCAPES:
+                return _ESCAPES[other]
+        elif int(hexa, 16) <= 0x10FFFF and not 0xD800 <= int(hexa, 16) <= 0xDFFF:
+            return chr(int(hexa, 16))
+        raise CypherError(f"unsupported escape {m.group(0)!r} in a string")
+
+    return re.sub(r"\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(.))", one, s[1:-1], flags=re.S)
 
 
 # ---------------------------------------------------------------------------------- parser

@@ -303,7 +303,12 @@ same two tables answer them too. `sql/graph_functions.sql` adds, on top of `sche
 | `graph.follow(start, rel_path)` | Every node reached by following a fixed sequence of relationship types |
 
 plus a btree index on `nodes.name` for exact lookups (the trigram index serves fuzzy ones) and a
-`graph.edges_both` view for undirected patterns. All of it is plain SQL and PL/pgSQL.
+`graph.edges_both` view for undirected patterns. All of it is plain SQL and PL/pgSQL. Apply it
+after `schema.sql`; the notebook applies only `schema.sql`, so run this file yourself:
+
+```bash
+psql "$LAKEBASE_DSN" -f sql/graph_functions.sql
+```
 
 ```sql
 SELECT node_id FROM graph.follow('film:up', ARRAY['DIRECTOR', 'MOTHER']);
@@ -325,9 +330,10 @@ The mapping onto the recipe schema: a node's label is `node_type`, its `name` pr
 `name` column and every other property lives in `props`; a relationship's type is `rel`. A property
 stored as JSON `null` reads as missing, as Cypher has no null properties. Edges have no id column,
 so a relationship is identified by its key `(src_id, dst_id, rel)` and returned as
-`[src_id, dst_id, rel]`. Variable-length patterns are capped at 6 hops, because the number of
-trails grows exponentially with hops around hub nodes; pass `max_hops=` to raise the cap
-deliberately.
+`[src_id, dst_id, rel]`. The variable-length patterns in one query may total at most 6 hops,
+because the number of trails grows exponentially with hops around hub nodes; pass `max_hops=` to
+raise the cap deliberately. A node, relationship or path compares only with another of its kind,
+and `<` or `>` between two lists is null rather than Cypher's element-by-element order.
 
 **Relationship uniqueness.** Cypher never binds the same relationship twice in one match, though a
 path may revisit a node. Around a triangle of three people who all know each other, three
@@ -340,7 +346,9 @@ revisiting a node, which is stricter than Cypher. For undirected walks the key c
 **Tests** (`tests/`) need a Postgres database they may overwrite: its `graph` schema is dropped and
 rebuilt from `schema.sql` and `graph_functions.sql`, so they run on the recipe's own tables. That
 database needs the `vector`, `ltree` and `pg_trgm` extensions `schema.sql` creates. Lakebase has
-all three; a stock local Postgres usually needs pgvector installed first.
+all three; a stock local Postgres usually needs pgvector installed first. As a guard, the tests
+refuse to drop a `graph` schema holding data they did not create, so pointing them at the database
+you serve from stops the run rather than emptying it.
 
 ```bash
 cd agents/graphrag
@@ -359,9 +367,6 @@ uv run --with pytest pytest tests -q
 - `test_pgq_crosscheck.py`: compares against Postgres's own SQL/PGQ `GRAPH_TABLE`, which was
   committed to the Postgres development branch and reverted before Postgres 19. It is skipped
   unless `PGRAPH_PGQ_DSN` points at a server built from commit `6168c65`.
-
-`PGRAPH_TRAIL=array` reruns everything with the uniqueness rule written as an explicit array check
-instead of `CYCLE`; both give the same rows.
 
 **When not to use this.** It covers the common case of a few hops over data that already lives in
 Postgres. The hop limits are deliberate. Deep traversals over dense graphs, whole-graph algorithms
