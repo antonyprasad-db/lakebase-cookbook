@@ -32,7 +32,6 @@ The semantics that matter for correctness follow Cypher:
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -60,16 +59,27 @@ MAX_HOPS = 6
 
 
 def _param_json(value) -> str:
-    """JSON for a bind value. Decimal (what psycopg returns for numeric columns) becomes a JSON
-    number; anything JSON cannot hold, NaN and infinity included, is a CypherError."""
+    """JSON for a bind value. Cypher has integers and floats but no decimals, so a Decimal (what
+    psycopg returns for numeric columns) becomes an integer when it is integral and a float
+    otherwise. Anything jsonb cannot hold (NaN, infinity, a NUL character, other types) is a
+    CypherError."""
 
     def default(o):
         if isinstance(o, Decimal) and o.is_finite():
             return int(o) if o == o.to_integral_value() else float(o)
         raise TypeError(type(o).__name__)
 
-    if isinstance(value, float) and not math.isfinite(value):
-        raise CypherError(f"{value} is not a valid parameter value")
+    def has_nul(v) -> bool:
+        if isinstance(v, str):
+            return "\x00" in v
+        if isinstance(v, list | tuple):
+            return any(has_nul(x) for x in v)
+        if isinstance(v, dict):
+            return any(has_nul(k) or has_nul(x) for k, x in v.items())
+        return False
+
+    if has_nul(value):
+        raise CypherError("a string cannot contain a NUL character")
     try:
         return json.dumps(value, default=default, allow_nan=False)
     except (TypeError, ValueError) as err:
@@ -333,6 +343,11 @@ class _Compiler:
             strings = f"jsonb_typeof({left}) = 'string' AND jsonb_typeof({right}) = 'string'"
             return f"(CASE WHEN {strings} THEN {test} END)"
         if isinstance(e, InList):
+            if isinstance(e.expr, Prop) and e.expr.key == "name":
+                kind, alias = self.lookup(e.expr.var)
+                if kind == "node":  # one text equality per item, so the btree on name serves it
+                    tests = [self.name_equals(alias, i) for i in e.items]
+                    return f"({' OR '.join(tests)})" if tests else "FALSE"
             items = ", ".join(self.val(i) for i in e.items)
             return f"({self.val(e.expr)} = ANY (ARRAY[{items}]::jsonb[]))"
         if isinstance(e, Agg):

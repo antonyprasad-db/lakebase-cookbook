@@ -290,6 +290,8 @@ class _Parser:
         t = self.next()
         if t.kind != "number" or "." in t.value:
             raise CypherError(f"expected an integer at {t.start}")
+        if int(t.value) > 2**63 - 1:
+            raise CypherError(f"{t.value} is too large at {t.start}")
         return int(t.value)
 
     # clauses
@@ -401,7 +403,13 @@ class _Parser:
             while True:
                 key = self.symbol()
                 self.expect(":")
-                pairs.append((key, self.atom()))
+                t, value = self.peek(), self.atom()
+                if not isinstance(value, Lit | Param):  # as Cypher: no pattern variables in a map
+                    raise CypherError(
+                        f"a property map value must be a literal or a parameter at {t.start};"
+                        " compare variables in WHERE"
+                    )
+                pairs.append((key, value))
                 if not self.accept(","):
                     break
         self.expect("}")

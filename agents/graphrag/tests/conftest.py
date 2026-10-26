@@ -1,7 +1,8 @@
 """Shared fixtures. Point PGRAPH_DSN at a throwaway Postgres database: its graph schema is dropped
 and rebuilt from sql/schema.sql and sql/graph_functions.sql, so the tests run on the recipe's own
 tables. It needs the extensions schema.sql creates (vector, ltree, pg_trgm), which Lakebase has.
-A graph schema that holds data the tests did not create is never dropped: the run stops instead."""
+A graph schema whose nodes table has rows is never dropped: the run stops instead. The tests drop
+their own schema when they finish, so a schema with rows is never theirs."""
 
 from __future__ import annotations
 
@@ -20,22 +21,21 @@ from pgcypher.reference import Edge, Graph  # noqa: E402
 
 
 def install(conn) -> None:
-    """Rebuild the graph schema. install() leaves a graph.pgraph_tests marker table, and a graph
-    schema with data but no marker belongs to someone else, so it is left alone."""
-    has_nodes, ours = conn.execute(
-        "SELECT to_regclass('graph.nodes') IS NOT NULL,"
-        " to_regclass('graph.pgraph_tests') IS NOT NULL"
-    ).fetchone()
-    if has_nodes and not ours and conn.execute("SELECT EXISTS (TABLE graph.nodes)").fetchone()[0]:
+    """Rebuild the graph schema, unless it holds data."""
+    has_nodes = conn.execute("SELECT to_regclass('graph.nodes') IS NOT NULL").fetchone()[0]
+    if has_nodes and conn.execute("SELECT EXISTS (TABLE graph.nodes)").fetchone()[0]:
         pytest.exit(
-            "PGRAPH_DSN has a graph schema with data these tests did not create; refusing to drop"
-            " it. Point PGRAPH_DSN at a throwaway database.",
+            "PGRAPH_DSN has a graph schema with data in it; refusing to drop it. Point PGRAPH_DSN"
+            " at a throwaway database, or drop graph yourself if an interrupted run left it.",
             returncode=2,
         )
     conn.execute("DROP SCHEMA IF EXISTS graph CASCADE")
     conn.execute((ROOT / "sql/schema.sql").read_text())
     conn.execute((ROOT / "sql/graph_functions.sql").read_text())
-    conn.execute("CREATE TABLE graph.pgraph_tests ()")
+
+
+def uninstall(conn) -> None:
+    conn.execute("DROP SCHEMA IF EXISTS graph CASCADE")
 
 
 def load(conn, g: Graph) -> None:
@@ -63,6 +63,7 @@ def conn():
     with psycopg.connect(dsn, autocommit=True) as c:
         install(c)
         yield c
+        uninstall(c)
 
 
 # A films and people graph small enough to work every answer out by hand.

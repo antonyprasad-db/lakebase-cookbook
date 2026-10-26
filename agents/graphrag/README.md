@@ -298,9 +298,9 @@ same two tables answer them too. `sql/graph_functions.sql` adds, on top of `sche
 
 | Function | Returns |
 |---|---|
-| `graph.neighbors(start, max_hops, rel_types, direction)` | Every node reachable within the hop limit, with its shortest hop count |
-| `graph.shortest_path(src, dst, max_hops, rel_types, direction)` | One shortest path, as an array of node ids |
-| `graph.follow(start, rel_path)` | Every node reached by following a fixed sequence of relationship types |
+| `graph.neighbors(start_id, max_hops, rel_types, direction)` | Every node reachable within the hop limit, with its shortest hop count |
+| `graph.shortest_path(src_id, dst_id, max_hops, rel_types, direction)` | One shortest path, as an array of node ids |
+| `graph.follow(start_id, rel_path)` | Every node reached by following a fixed sequence of relationship types |
 
 plus a btree index on `nodes.name` for exact lookups (the trigram index serves fuzzy ones) and a
 `graph.edges_both` view for undirected patterns. All of it is plain SQL and PL/pgSQL. Apply it
@@ -315,7 +315,8 @@ SELECT node_id FROM graph.follow('film:up', ARRAY['DIRECTOR', 'MOTHER']);
 ```
 
 For ad hoc questions, `pgcypher/` compiles a read-only subset of openCypher into **one** SQL
-query over the same tables. Every value is a bind parameter, and anything outside the subset
+query over the same tables. It is a plain package in this folder, so run from `agents/graphrag`
+or put that folder on `sys.path` (from the notebook, `sys.path.append("..")`). Every value is a bind parameter, and anything outside the subset
 (OPTIONAL MATCH, WITH, writes, unbounded paths) is rejected rather than approximated:
 
 ```python
@@ -333,7 +334,10 @@ so a relationship is identified by its key `(src_id, dst_id, rel)` and returned 
 `[src_id, dst_id, rel]`. The variable-length patterns in one query may total at most 6 hops,
 because the number of trails grows exponentially with hops around hub nodes; pass `max_hops=` to
 raise the cap deliberately. A node, relationship or path compares only with another of its kind,
-and `<` or `>` between two lists is null rather than Cypher's element-by-element order.
+and `<` or `>` between two lists is null rather than Cypher's element-by-element order. Property
+map values are literals or parameters, as in Cypher. ORDER BY on list values orders them as
+Postgres orders jsonb, so strings inside lists follow the database collation (code point order on
+Lakebase's default `C.UTF-8`).
 
 **Relationship uniqueness.** Cypher never binds the same relationship twice in one match, though a
 path may revisit a node. Around a triangle of three people who all know each other, three
@@ -347,8 +351,8 @@ revisiting a node, which is stricter than Cypher. For undirected walks the key c
 rebuilt from `schema.sql` and `graph_functions.sql`, so they run on the recipe's own tables. That
 database needs the `vector`, `ltree` and `pg_trgm` extensions `schema.sql` creates. Lakebase has
 all three; a stock local Postgres usually needs pgvector installed first. As a guard, the tests
-refuse to drop a `graph` schema holding data they did not create, so pointing them at the database
-you serve from stops the run rather than emptying it.
+refuse to drop a `graph` schema whose `nodes` table has rows, and drop their own schema when they
+finish, so pointing them at the database you serve from stops the run rather than emptying it.
 
 ```bash
 cd agents/graphrag

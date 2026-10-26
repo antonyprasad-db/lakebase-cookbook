@@ -178,6 +178,13 @@ CASES = [
     # WHERE n.name = ... takes the same text-equality path as {name: ...}
     ("MATCH (f)-[:DIRECTOR]->(d) WHERE f.name = $film RETURN d.name", {"film": "Up"}, [("Bob",)]),
     ("MATCH (f)-[:DIRECTOR]->(d) WHERE 'Heat' = f.name RETURN d.name", None, [("Alice",)]),
+    (
+        "MATCH (p) WHERE p.name IN ['Bob', 2, 'Dan'] RETURN p.name ORDER BY p.name",
+        None,
+        [("Bob",), ("Dan",)],
+    ),
+    ("MATCH (p) WHERE p.name IN [] RETURN p.name", None, []),
+    ("MATCH (p:Person) WHERE NOT (p.name IN ['Bob', null]) RETURN p.name", None, []),
     (  # an ORDER BY name is the RETURN alias, even when a variable has the same name
         "MATCH (a:Person), (b:Person) WHERE a.born < b.born RETURN a AS b, b AS a"
         " ORDER BY a DESC, b",
@@ -250,6 +257,11 @@ def test_without_uniqueness_the_triangle_has_24_walks(films):
         "MATCH (a) WHERE a IN ['p:alice'] RETURN a",
         "MATCH (a) WHERE a STARTS WITH 'p' RETURN a",
         "MATCH (a) WHERE a.name = 'x\\q' RETURN a",  # an escape Cypher does not have
+        "MATCH (a), (b {ref: a}) RETURN b",  # map values are literals or parameters, as in Cypher
+        "MATCH (a)-[:KNOWS {since: b.born}]->(b) RETURN a",
+        "MATCH (a)-[b]->(b) RETURN a",
+        "MATCH (a) WHERE a.name = 'x\\u0000' RETURN a",  # jsonb cannot hold NUL
+        "MATCH (a) RETURN a LIMIT 99999999999999999999",
     ],
 )
 def test_unsupported_or_invalid_queries_raise(query):
@@ -262,7 +274,12 @@ def test_hop_cap_can_be_raised_deliberately():
 
 
 @pytest.mark.parametrize(
-    "query", ["MATCH (f {name: $n}) RETURN f", "MATCH (f) WHERE f.name = $n RETURN f"]
+    "query",
+    [
+        "MATCH (f {name: $n}) RETURN f",
+        "MATCH (f) WHERE f.name = $n RETURN f",
+        "MATCH (f) WHERE f.name IN [$n, 'x'] RETURN f",
+    ],
 )
 def test_name_equality_is_text_so_the_name_index_serves_it(query):
     """Both forms must compare the name column as text; to_jsonb(name) would bypass the btree."""
@@ -295,7 +312,9 @@ def test_keywords_are_fine_as_labels_types_and_keys():
     assert ["CONTAINS"] in bound
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), datetime.date(2024, 1, 1), {1, 2}])
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), datetime.date(2024, 1, 1), {1, 2}, "x\x00y", ["a\x00"]]
+)
 def test_parameters_json_cannot_hold_raise(value):
     with pytest.raises(CypherError):
         compile_cypher("MATCH (f) WHERE f.year > $y RETURN f", {"y": value})
@@ -306,16 +325,10 @@ def test_decimal_parameters_are_numbers(films):
     assert rows == [("Up",)]
 
 
-def test_a_graph_schema_the_tests_did_not_create_is_never_dropped(films):
-    films.execute("DROP TABLE graph.pgraph_tests")  # now it looks like someone else's graph
-    try:
-        with pytest.raises(pytest.exit.Exception, match="refusing to drop"):
-            install(films)
-        assert films.execute("SELECT count(*) FROM graph.nodes").fetchone()[0] == len(
-            FILMS.vertices
-        )
-    finally:
-        films.execute("CREATE TABLE graph.pgraph_tests ()")
+def test_a_graph_schema_holding_data_is_never_dropped(films):
+    with pytest.raises(pytest.exit.Exception, match="refusing to drop"):
+        install(films)
+    assert films.execute("SELECT count(*) FROM graph.nodes").fetchone()[0] == len(FILMS.vertices)
 
 
 def test_rows_are_values_whatever_the_row_factory(films):

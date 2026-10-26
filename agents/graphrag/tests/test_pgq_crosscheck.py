@@ -14,7 +14,7 @@ import random
 
 import psycopg
 import pytest
-from conftest import install, load
+from conftest import install, load, uninstall
 from test_differential import LABELS, NAMES, TYPES, random_graph
 
 from pgcypher import compiler
@@ -64,6 +64,7 @@ def pgq():
             f"EDGE TABLES ({', '.join(edge_tables)})"
         )
         yield c
+        uninstall(c)
 
 
 def random_pair(rng: random.Random) -> tuple[str, str]:

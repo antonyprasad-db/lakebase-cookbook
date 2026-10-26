@@ -253,8 +253,10 @@ class _Ref:
                 yield from patterns(pi + 1, env, used)
                 return
             r, n = p.rels[ri], p.nodes[ri + 1]
-            if r.var and r.var in env:
+            if r.var and (r.var in env or r.var == n.var):
                 raise CypherError(f"variable {r.var} is bound twice")
+            if n.var and n.var in env and env[n.var][0] != "node":
+                raise CypherError(f"{n.var} is a relationship, not a node")
             if r.var_length:
                 options = [(end, path) for end, path in self.trails(cur, r, env, used)]
             else:
