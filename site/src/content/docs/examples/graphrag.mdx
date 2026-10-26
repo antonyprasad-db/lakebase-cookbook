@@ -123,6 +123,40 @@ This is the GraphRAG win: a supplier or substitute that shares no keywords with
 the question still surfaces because it's one hop from a semantically-matched node
 — something flat vector RAG never retrieves.
 
+## Property graph queries
+
+Retrieval answers "what is near this seed". Questions that follow specific relationships, such as
+"who is the mother of the director of this film?", run on the same two tables:
+
+- [`sql/graph_functions.sql`](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/sql/graph_functions.sql) adds `graph.neighbors`,
+  `graph.shortest_path` and `graph.follow` in plain SQL and PL/pgSQL, a btree index on
+  `nodes.name` for exact lookups, and a `graph.edges_both` view for undirected patterns.
+- [`pgcypher/`](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/pgcypher) compiles a read-only subset of openCypher into one SQL query, with
+  every value as a bind parameter. Unsupported clauses such as OPTIONAL MATCH are rejected, not
+  approximated.
+
+```python
+from pgcypher.compiler import run
+
+run(conn, "MATCH (f {name: $film})-[:DIRECTOR]->(d)-[:MOTHER]->(m) RETURN DISTINCT m.name",
+    {"film": "Up"})
+```
+
+The compiler follows Cypher's relationship uniqueness: no edge is bound twice in a match, though a
+path may revisit a node. Variable-length patterns compile to a recursive CTE whose Postgres `CYCLE`
+clause is keyed on the edge key `(src_id, dst_id, rel)`. Keyed on the node instead, it would be
+stricter than Cypher.
+
+The [tests](https://github.com/databricks-solutions/lakebase-cookbook/tree/main/agents/graphrag/tests) run on the recipe's own schema against a real Postgres: hand-computed
+answers, randomized queries over random graphs checked against a brute-force matcher, the SQL
+functions against a Python breadth-first search, and an optional cross-check against Postgres's
+SQL/PGQ. See the README for how to run them.
+
+<Callout type="note" title="Scope">
+This covers a few hops over data already in Postgres. Deep traversals over dense graphs,
+whole-graph algorithms and graph-native writes belong in a dedicated graph engine.
+</Callout>
+
 ## The certified core (Unity Catalog metric views)
 
 The authority stage needs some node to *be* certified. `graph_certified.py` produces those from
