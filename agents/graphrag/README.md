@@ -371,6 +371,14 @@ uv run --with pytest pytest tests -q
 - `test_pgq_crosscheck.py`: compares against Postgres's own SQL/PGQ `GRAPH_TABLE`, which was
   committed to the Postgres development branch and reverted before Postgres 19. It is skipped
   unless `PGRAPH_PGQ_DSN` points at a server built from commit `6168c65`.
+- `seeded_bugs.py` (a script, not a test): checks that the randomized tests catch a wrong
+  compiler. It seeds four bugs in memory (no relationship uniqueness, nulls sorted first, an edge
+  repeated inside a variable-length path, undirected treated as outgoing), each a one-line text
+  change or, for uniqueness, the method replaced by a no-op. It runs `test_differential.py`
+  against each and exits 1 if any bug gives no wrong answer, or 2 if a result cannot be measured or
+  trusted, such as no `PGRAPH_DSN`, a stale bug entry or a clean compiler that fails (the reason is
+  printed). Run it with `uv run --with pytest python tests/seeded_bugs.py` and the same
+  `PGRAPH_DSN`.
 
 **When not to use this.** It covers the common case of a few hops over data that already lives in
 Postgres. The hop limits are deliberate. Deep traversals over dense graphs, whole-graph algorithms
