@@ -264,6 +264,9 @@ def test_without_uniqueness_the_triangle_has_24_walks(films):
         "MATCH (a)-[p*1..2]->(b), (p)-->(c) RETURN c",  # a path reused as a node
         "MATCH (a) WHERE a.name = 'x\\u0000' RETURN a",  # jsonb cannot hold NUL
         "MATCH (a) RETURN a LIMIT 99999999999999999999",
+        "MATCH (a) RETURN size(a.x)",  # only count and collect; agg() would treat it as collect
+        "MATCH (a) RETURN toLower(a.name)",
+        "MATCH (a) WHERE toLower(a.name) = 'x' RETURN a",
     ],
 )
 def test_unsupported_or_invalid_queries_raise(query):
